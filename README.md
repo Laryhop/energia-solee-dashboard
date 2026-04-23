@@ -1,36 +1,67 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Dashboard de Usina Solar
 
-## Getting Started
+Projeto em Next.js 16 preparado para deploy na Vercel, com integracao ao GoodWe SEMS Portal por API nao oficial.
 
-First, run the development server:
+## O que entrega
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+- metricas de geracao hoje e no mes
+- economia estimada em reais
+- performance diaria contra meta
+- status da usina e dos inversores
+- grafico horario de potencia
+- historico diario recente
+- cache no backend para reduzir carga na API externa
+
+## Arquitetura
+
+- `src/app/api/solar/route.ts`: endpoint server-side para concentrar acesso ao SEMS
+- `src/lib/sems/client.ts`: cliente HTTP da integracao nao oficial
+- `src/lib/solar-dashboard.ts`: transformacao do payload do SEMS para o contrato do frontend
+- `src/components/dashboard-shell.tsx`: dashboard client-side com polling a cada 60s
+- `src/lib/env.ts`: validacao forte das variaveis de ambiente com `zod`
+
+## Variaveis de ambiente
+
+Copie `.env.example` para `.env.local` e preencha:
+
+```env
+SEMS_USER=seu_email
+SEMS_PASS=sua_senha
+SEMS_PLANT_ID=
+TARIFA_KWH=0.90
+META_DIARIA=1500
+SEMS_CACHE_TTL_MS=60000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Observacoes
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `SEMS_PLANT_ID` e opcional, mas recomendado para producao.
+- Se nao for informado, o backend tenta descobrir a primeira usina da conta.
+- `META_DIARIA` alimenta o calculo de performance.
+- `TARIFA_KWH` alimenta a estimativa de economia.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Desenvolvimento local
 
-## Learn More
+```bash
+npm install
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+Abra [http://localhost:3000](http://localhost:3000).
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Validacao
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```bash
+npm run lint
+npm run build
+```
 
-## Deploy on Vercel
+## Deploy na Vercel
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Crie um novo projeto importando este repositorio.
+2. Configure as variaveis de ambiente no painel da Vercel.
+3. Faça o deploy.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Risco conhecido
+
+Essa integracao usa endpoints nao oficiais do SEMS Portal. Isso significa que a GoodWe pode alterar autenticacao, payloads ou rotas sem aviso. Para producao real, vale acompanhar logs do endpoint `/api/solar` e considerar migracao para uma API oficial assim que estiver disponivel para sua conta.
