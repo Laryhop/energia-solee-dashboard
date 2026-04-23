@@ -82,6 +82,11 @@ type ComparisonRow = {
   deltaKwh: number;
 };
 
+type ChartPoint = {
+  label: string;
+  value: number;
+};
+
 const REFRESH_INTERVAL_MS = 60_000;
 
 const numberFormatter = new Intl.NumberFormat("pt-BR", {
@@ -238,17 +243,39 @@ function LineChart({ points }: { points: Array<{ label: string; value: number }>
   const height = 260;
   const maxValue = Math.max(...points.map((point) => point.value), 1);
   const stepX = points.length > 1 ? width / (points.length - 1) : width;
+  const chartPoints = points.map((point, index) => {
+    const x = index * stepX;
+    const y = height - (point.value / maxValue) * (height - 20) - 10;
+    return { ...point, x, y };
+  });
 
-  const path = points
+  const path = chartPoints
     .map((point, index) => {
-      const x = index * stepX;
-      const y = height - (point.value / maxValue) * (height - 20) - 10;
-      return `${index === 0 ? "M" : "L"} ${x} ${y}`;
+      return `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`;
     })
     .join(" ");
 
   return (
-    <div className="space-y-4">
+    <InteractiveLineChart chartPoints={chartPoints} height={height} path={path} width={width} />
+  );
+}
+
+function InteractiveLineChart({
+  chartPoints,
+  height,
+  path,
+  width,
+}: {
+  chartPoints: Array<ChartPoint & { x: number; y: number }>;
+  height: number;
+  path: string;
+  width: number;
+}) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const activePoint = activeIndex === null ? null : chartPoints[activeIndex];
+
+  return (
+    <div className="relative">
       <div className="overflow-hidden rounded-3xl border border-[#e6eddc] bg-[#fffdf5] p-4">
         <svg viewBox={`0 0 ${width} ${height}`} className="h-64 w-full">
           <defs>
@@ -277,21 +304,42 @@ function LineChart({ points }: { points: Array<{ label: string; value: number }>
             strokeLinejoin="round"
             strokeWidth="4"
           />
+          {activePoint ? (
+            <>
+              <line
+                x1={activePoint.x}
+                x2={activePoint.x}
+                y1="0"
+                y2={height}
+                stroke="rgba(13, 91, 63, 0.18)"
+                strokeDasharray="6 8"
+              />
+              <circle cx={activePoint.x} cy={activePoint.y} fill="#ffffff" r="8" />
+              <circle cx={activePoint.x} cy={activePoint.y} fill="#ff9d1c" r="5" />
+            </>
+          ) : null}
+          {chartPoints.map((point, index) => (
+            <circle
+              key={`${point.label}-${index}`}
+              cx={point.x}
+              cy={point.y}
+              r="12"
+              fill="transparent"
+              onMouseEnter={() => setActiveIndex(index)}
+              onMouseLeave={() => setActiveIndex(null)}
+            />
+          ))}
         </svg>
       </div>
-      <div className="grid grid-cols-2 gap-3 text-sm text-[#355c4a] sm:grid-cols-4 lg:grid-cols-6">
-        {points.map((point) => (
-          <div
-            key={point.label}
-            className="rounded-2xl border border-[#ecf1e7] bg-[#fdf7df] px-3 py-3"
-          >
-            <p className="text-xs uppercase tracking-[0.12em] text-[#8b8e57]">{point.label}</p>
-            <p className="mt-1 font-medium text-[#0d5b3f]">
-              {numberFormatter.format(point.value)} kW
-            </p>
-          </div>
-        ))}
-      </div>
+      {activePoint ? (
+        <div className="pointer-events-none absolute left-6 top-6 rounded-2xl border border-[#f0d9a2] bg-white/95 px-4 py-3 shadow-[0_12px_30px_rgba(13,91,63,0.12)]">
+          <p className="text-xs uppercase tracking-[0.14em] text-[#a86d00]">{activePoint.label}</p>
+          <p className="mt-1 text-lg font-semibold text-[#0d5b3f]">
+            {numberFormatter.format(activePoint.value)} kW
+          </p>
+          <p className="text-sm text-[#557c69]">Geracao estimada nessa hora do dia</p>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -501,30 +549,30 @@ export function DashboardShell() {
             </section>
 
             <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-              <SectionCard
-                title="Resumo de venda de energia"
-                subtitle="Quanto a usina gerou em reais com base na tarifa configurada."
-              >
-                <div className="grid gap-4 md:grid-cols-3">
-                  <MetricCard
-                    label="Venda hoje"
-                    value={formatCurrency(state.data.solar.summary.economyTodayBrl)}
-                    hint={`${formatKwh(state.data.solar.summary.todayGenerationKwh)} gerados hoje`}
-                    accent="from-[#fff7de] to-[#fffef8]"
-                  />
-                  <MetricCard
-                    label="Venda no mes"
-                    value={formatCurrency(state.data.solar.summary.economyMonthBrl)}
-                    hint={`${formatKwh(state.data.solar.summary.monthlyGenerationKwh)} acumulados no mes`}
-                    accent="from-[#fff0d4] to-[#fffaf0]"
-                  />
-                  <MetricCard
-                    label="Venda total"
-                    value={formatCurrency(state.data.solar.summary.totalRevenueBrl)}
-                    hint={`${formatKwh(state.data.solar.summary.totalGenerationKwh)} acumulados na usina`}
-                    accent="from-[#edf7ef] to-[#fbfffc]"
-                  />
-                </div>
+            <SectionCard
+              title="Valor estimado da energia gerada"
+              subtitle="Estimativa em reais da energia gerada pela usina com base na tarifa configurada. Nao representa venda liquidada."
+            >
+              <div className="grid gap-4 md:grid-cols-3">
+                <MetricCard
+                  label="Valor gerado hoje"
+                  value={formatCurrency(state.data.solar.summary.economyTodayBrl)}
+                  hint={`${formatKwh(state.data.solar.summary.todayGenerationKwh)} gerados hoje`}
+                  accent="from-[#fff7de] to-[#fffef8]"
+                />
+                <MetricCard
+                  label="Valor gerado no mes"
+                  value={formatCurrency(state.data.solar.summary.economyMonthBrl)}
+                  hint={`${formatKwh(state.data.solar.summary.monthlyGenerationKwh)} acumulados no mes`}
+                  accent="from-[#fff0d4] to-[#fffaf0]"
+                />
+                <MetricCard
+                  label="Valor gerado total"
+                  value={formatCurrency(state.data.solar.summary.totalRevenueBrl)}
+                  hint={`${formatKwh(state.data.solar.summary.totalGenerationKwh)} acumulados na usina`}
+                  accent="from-[#edf7ef] to-[#fbfffc]"
+                />
+              </div>
               </SectionCard>
 
               <SectionCard
@@ -580,7 +628,7 @@ export function DashboardShell() {
             <div className="grid gap-6 xl:grid-cols-[1.35fr_0.95fr]">
               <SectionCard
                 title="Geracao por hora"
-                subtitle="Curva diaria de potencia retornada pela integracao do SEMS."
+                subtitle="Passe o mouse sobre o grafico para ver quanto foi gerado em cada hora do dia."
               >
                 <LineChart
                   points={state.data.solar.hourlyChart.map((point) => ({
