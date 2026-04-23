@@ -112,7 +112,7 @@ export function DashboardShell() {
           <div className="relative h-[350px] w-full">
             <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-full overflow-visible" preserveAspectRatio="none">
               <path d={`${d} L ${width} ${height} L 0 ${height} Z`} fill="url(#sun-grad)" className="opacity-40" />
-              <path d={d} fill="none" stroke="#f8b93c" strokeWidth="5" strokeLinecap="round" strokeJoin="round" />
+              <path d={d} fill="none" stroke="#f8b93c" strokeWidth="5" strokeLinecap="round" strokeLinejoin="round" />
               <defs>
                 <linearGradient id="sun-grad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="#f8b93c" />
