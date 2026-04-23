@@ -29,6 +29,7 @@ export type SemsPlantSnapshot = {
   location: string | null;
   totalGenerationKwh: number;
   todayGenerationKwh: number;
+  monthGenerationKwh: number;
   currentPowerKw: number;
   status: string;
   inverters: SemsInverter[];

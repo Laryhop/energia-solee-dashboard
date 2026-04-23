@@ -88,9 +88,15 @@ export async function getSolarDashboardData(): Promise<SolarDashboardData> {
     const monthlyPoint = snapshot.monthlyHistory.findLast(
       (item) => getMonthKey(item.date) === currentMonthKey,
     );
+    const dailyHistoryGeneration = snapshot.dailyHistory.reduce(
+      (total, item) => total + item.generationKwh,
+      0,
+    );
     const monthlyGenerationKwh =
-      monthlyPoint?.generationKwh ??
-      snapshot.dailyHistory.reduce((total, item) => total + item.generationKwh, 0);
+      snapshot.monthGenerationKwh ||
+      monthlyPoint?.generationKwh ||
+      dailyHistoryGeneration ||
+      snapshot.todayGenerationKwh;
     const economyTodayBrl = snapshot.todayGenerationKwh * env.TARIFA_KWH;
     const economyMonthBrl = monthlyGenerationKwh * env.TARIFA_KWH;
     const performancePct =

@@ -234,6 +234,46 @@ function mapInverters(payload: unknown): SemsInverter[] {
   });
 }
 
+function getMonthGenerationFromDetail(
+  kpi: Record<string, unknown>,
+  inverters: SemsInverter[],
+  rawInverters: unknown[],
+) {
+  const fromKpi =
+    parseNumber(kpi.month_power) ||
+    parseNumber(kpi.month_generation) ||
+    parseNumber(kpi.monthPower) ||
+    parseNumber(kpi.monthGeneration);
+
+  if (fromKpi > 0) {
+    return fromKpi;
+  }
+
+  const fromRawInverters = rawInverters.reduce<number>((total, item) => {
+    const record = item as Record<string, unknown>;
+    const details =
+      record.invert_full && typeof record.invert_full === "object"
+        ? (record.invert_full as Record<string, unknown>)
+        : {};
+
+    return (
+      total +
+      parseNumber(
+        record.month_generation ||
+          record.monthGeneration ||
+          details.emonth ||
+          details.month_generation,
+      )
+    );
+  }, 0);
+
+  if (fromRawInverters > 0) {
+    return fromRawInverters;
+  }
+
+  return inverters.reduce((total, inverter) => total + inverter.dayGenerationKwh, 0);
+}
+
 function mapHourlyChart(payload: unknown): SemsHourlyPoint[] {
   const data = unwrapEnvelope<Record<string, unknown>>(payload);
   const pacs = Array.isArray(data.pacs) ? data.pacs : [];
@@ -253,11 +293,28 @@ function mapHourlyChart(payload: unknown): SemsHourlyPoint[] {
 
 function mapDailyHistory(payload: unknown): SemsDailyPoint[] {
   const data = unwrapEnvelope<unknown>(payload);
-  const rows = Array.isArray(data)
+  const directRows = Array.isArray(data)
     ? data
     : Array.isArray((data as { list?: unknown[] })?.list)
       ? ((data as { list: unknown[] }).list ?? [])
       : [];
+  const rows =
+    directRows.length > 0
+      ? directRows
+      : collectObjects(data).filter((item) => {
+          const hasDateLikeField = Boolean(
+            parseString(item.date) || parseString(item.day) || parseString(item.month),
+          );
+          const hasPowerLikeField = [
+            item.p,
+            item.power,
+            item.value,
+            item.generation,
+            item.generationKwh,
+          ].some((value) => parseNumber(value) > 0);
+
+          return hasDateLikeField && hasPowerLikeField;
+        });
 
   return rows
     .map((item) => {
@@ -267,7 +324,13 @@ function mapDailyHistory(payload: unknown): SemsDailyPoint[] {
 
       return {
         date: rawDate ? toIsoDate(rawDate) : rawDate,
-        generationKwh: parseNumber(record.p || record.power),
+        generationKwh: parseNumber(
+          record.p ||
+            record.power ||
+            record.value ||
+            record.generation ||
+            record.generationKwh,
+        ),
       };
     })
     .filter((item) => item.date)
@@ -336,8 +399,22 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
       ? (detail.kpi as Record<string, unknown>)
       : {};
   const inverters = mapInverters(detail);
+  const rawInverters = Array.isArray(detail.inverter) ? detail.inverter : [];
   const dailyHistory = mapDailyHistory(dailyPayload);
   const monthlyHistory = mapDailyHistory(monthlyPayload);
+  const todayGenerationKwh = parseNumber(kpi.power);
+  const monthGenerationKwh = getMonthGenerationFromDetail(kpi, inverters, rawInverters);
+  const hydratedDailyHistory =
+    dailyHistory.length > 0
+      ? dailyHistory
+      : todayGenerationKwh > 0
+        ? [
+            {
+              date: new Date().toISOString(),
+              generationKwh: todayGenerationKwh,
+            },
+          ]
+        : [];
 
   return {
     plantId,
@@ -348,16 +425,17 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
       ) || "Usina Solar",
     location: location || null,
     totalGenerationKwh: parseNumber(kpi.total_power),
-    todayGenerationKwh: parseNumber(kpi.power),
+    todayGenerationKwh,
+    monthGenerationKwh,
     currentPowerKw: parseNumber(kpi.pac || detail.power) / 1000,
     status:
       resolveStatusLabel(
         parseString((detail.info as Record<string, unknown> | undefined)?.status) ||
           (detail.inverter as Array<Record<string, unknown>> | undefined)?.[0]?.status,
-      ) || "Indefinido",
+    ) || "Indefinido",
     inverters,
     hourlyChart: mapHourlyChart(hourlyPayload),
-    dailyHistory,
+    dailyHistory: hydratedDailyHistory,
     monthlyHistory,
   };
 }
