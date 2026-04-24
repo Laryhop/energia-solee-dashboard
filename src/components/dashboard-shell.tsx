@@ -47,6 +47,10 @@ export function DashboardShell() {
     async function loadData() {
       try {
         const [s, w] = await Promise.all([fetch("/api/solar"), fetch("/api/weather")]);
+        if (s.status === 401 || w.status === 401) {
+          window.location.reload();
+          return;
+        }
         const sData = await s.json();
         const wData = await w.json();
         setState({ status: "success", data: { solar: sData, weather: wData } });

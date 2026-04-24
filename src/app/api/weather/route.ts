@@ -1,3 +1,4 @@
+import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 type ForecastResponse = {
@@ -58,6 +59,11 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
+  const cookieStore = await cookies();
+  if (cookieStore.get("solee_auth")?.value !== "1") {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   try {
     const forecastResponse = await fetch(
       `https://api.open-meteo.com/v1/forecast?latitude=${MARAVILHA_AL.latitude}&longitude=${MARAVILHA_AL.longitude}&current=temperature_2m,wind_speed_10m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&forecast_days=3&timezone=America%2FMaceio`,
