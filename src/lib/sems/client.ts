@@ -296,7 +296,7 @@ function mapDailyHistory(payload: unknown): SemsDailyPoint[] {
       ? directRows
       : collectObjects(data).filter((item) => {
           const hasDateLikeField = Boolean(
-            parseString(item.date) || parseString(item.day) || parseString(item.month),
+            parseString(item.date) || parseString(item.day) || parseString(item.month) || parseString(item.d),
           );
           const hasPowerLikeField = [
             item.p,
@@ -313,7 +313,7 @@ function mapDailyHistory(payload: unknown): SemsDailyPoint[] {
     .map((item) => {
       const record = item as Record<string, unknown>;
       const rawDate =
-        parseString(record.date) || parseString(record.day) || parseString(record.month);
+        parseString(record.date) || parseString(record.day) || parseString(record.month) || parseString(record.d);
 
       return {
         date: rawDate ? toIsoDate(rawDate) : rawDate,
@@ -400,8 +400,6 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     return []; 
   });
 
-  errorLog += `[Debug CurrentRaw: ${JSON.stringify(dailyCurrentRaw).substring(0, 100)}] `;
-  errorLog += `[Debug PastRaw: ${JSON.stringify(dailyPastRaw).substring(0, 100)}] `;
 
   const detail = unwrapEnvelope<Record<string, unknown>>(detailPayload);
   const location = parseString(
