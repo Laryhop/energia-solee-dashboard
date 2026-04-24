@@ -347,21 +347,12 @@ async function fetchPlantDetail(session: LoginSession, plantId: string) {
   });
 }
 
-// ADICIONEI O PARÂMETRO dateStr PARA PODERMOS VOLTAR NO TEMPO
-async function fetchPlantPowerByDay(session: LoginSession, plantId: string, count: number, dateStr?: string) {
-  return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPowerAndIncomeByDay", session, {
-    powerstation_id: plantId,
-    date: dateStr || formatDateInput(new Date()),
-    count,
-    id: plantId,
-  });
-}
-
-async function fetchPlantPowerByMonth(session: LoginSession, plantId: string, count: number) {
+// A MÁGICA ESTÁ AQUI: Esta rota (ByMonth) é a que traz a lista de todos os dias do mês
+async function fetchPlantDailyDataForMonth(session: LoginSession, plantId: string, dateStr: string) {
   return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPowerAndIncomeByMonth", session, {
     powerstation_id: plantId,
-    date: formatDateInput(new Date()),
-    count,
+    date: dateStr,
+    count: 1, 
     id: plantId,
   });
 }
@@ -382,21 +373,17 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     throw new Error("Nenhuma usina encontrada para a conta informada.");
   }
 
-  // TRUQUE DE MESTRE: Criar 4 datas voltando 15 dias de cada vez (Total 60 dias)
-  const d0 = new Date();
-  const d15 = new Date(); d15.setDate(d0.getDate() - 15);
-  const d30 = new Date(); d30.setDate(d0.getDate() - 30);
-  const d45 = new Date(); d45.setDate(d0.getDate() - 45);
+  // Define a data de Hoje e a data de 1 Mês Atrás
+  const today = new Date();
+  const lastMonth = new Date();
+  lastMonth.setMonth(today.getMonth() - 1);
 
-  // Faz as requisições em blocos curtos para a API da GoodWe aceitar
-  const [detailPayload, hourlyPayload, daily0, daily15, daily30, daily45, monthlyPayload] = await Promise.all([
+  // Faz as requisições: Pega a usina, a curva de hora, o mês atual (em dias) e o mês passado (em dias)
+  const [detailPayload, hourlyPayload, currentMonthPayload, lastMonthPayload] = await Promise.all([
     fetchPlantDetail(session, plantId),
     fetchPlantHourlyPower(session, plantId).catch(() => ({ pacs: [] })),
-    fetchPlantPowerByDay(session, plantId, 15, formatDateInput(d0)).catch(() => []),
-    fetchPlantPowerByDay(session, plantId, 15, formatDateInput(d15)).catch(() => []),
-    fetchPlantPowerByDay(session, plantId, 15, formatDateInput(d30)).catch(() => []),
-    fetchPlantPowerByDay(session, plantId, 15, formatDateInput(d45)).catch(() => []),
-    fetchPlantPowerByMonth(session, plantId, 12).catch(() => []),
+    fetchPlantDailyDataForMonth(session, plantId, formatDateInput(today)).catch(() => []),
+    fetchPlantDailyDataForMonth(session, plantId, formatDateInput(lastMonth)).catch(() => []),
   ]);
 
   const detail = unwrapEnvelope<Record<string, unknown>>(detailPayload);
@@ -412,18 +399,16 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
   const inverters = mapInverters(detail);
   const rawInverters = Array.isArray(detail.inverter) ? detail.inverter : [];
   
-  // Junta os 4 blocos (60 dias) em uma lista só, removendo os repetidos
-  const rawD0 = mapDailyHistory(daily0);
-  const rawD15 = mapDailyHistory(daily15);
-  const rawD30 = mapDailyHistory(daily30);
-  const rawD45 = mapDailyHistory(daily45);
-
-  const mergedDaily = [...rawD45, ...rawD30, ...rawD15, ...rawD0];
+  // Processando os dias do mês passado e do mês atual
+  const rawCurrentMonth = mapDailyHistory(currentMonthPayload);
+  const rawLastMonth = mapDailyHistory(lastMonthPayload);
+  
+  // Juntando os dois meses num histórico só de 60 dias
+  const mergedDaily = [...rawLastMonth, ...rawCurrentMonth];
   const dailyHistory = mergedDaily
-    .filter((v, i, a) => a.findIndex((v2) => v2.date === v.date) === i)
-    .sort((a, b) => a.date.localeCompare(b.date));
+    .filter((v, i, a) => a.findIndex((v2) => v2.date === v.date) === i) // Remove dados duplicados
+    .sort((a, b) => a.date.localeCompare(b.date)); // Ordena do mais antigo pro mais novo
 
-  const monthlyHistory = mapDailyHistory(monthlyPayload);
   const todayGenerationKwh = parseNumber(kpi.power);
   const monthGenerationKwh = getMonthGenerationFromDetail(kpi, inverters, rawInverters);
   
@@ -459,6 +444,6 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     inverters,
     hourlyChart: mapHourlyChart(hourlyPayload),
     dailyHistory: hydratedDailyHistory,
-    monthlyHistory,
+    monthlyHistory: [], // O seu site puxa do dailyHistory, então não precisamos disto agora
   };
 }
