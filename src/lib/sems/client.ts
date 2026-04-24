@@ -384,7 +384,7 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
   const [detailPayload, hourlyPayload, dailyPayload, monthlyPayload] = await Promise.all([
     fetchPlantDetail(session, plantId),
     fetchPlantHourlyPower(session, plantId).catch(() => ({ pacs: [] })),
-    fetchPlantPowerByDay(session, plantId, 14).catch(() => []),
+    fetchPlantPowerByDay(session, plantId, 60).catch(() => []),
     fetchPlantPowerByMonth(session, plantId, 12).catch(() => []),
   ]);
 
