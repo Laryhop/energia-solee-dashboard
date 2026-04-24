@@ -36,4 +36,5 @@ export type SemsPlantSnapshot = {
   hourlyChart: SemsHourlyPoint[];
   dailyHistory: SemsDailyPoint[];
   monthlyHistory: SemsDailyPoint[];
+  errorLog?: string;
 };

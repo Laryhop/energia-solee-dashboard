@@ -387,14 +387,16 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
   const today = new Date();
   const pastMonth = new Date();
   pastMonth.setDate(today.getDate() - 31);
+  
+  let errorLog = "";
 
   const dailyCurrentRaw = await fetchPlantPowerByDay(session, plantId, 31, formatDateInput(today)).catch((e) => { 
-    console.error("DailyCurrent Error:", e); 
+    errorLog += `[DailyCurrent Error: ${e.message}] `;
     return []; 
   });
   
   const dailyPastRaw = await fetchPlantPowerByDay(session, plantId, 31, formatDateInput(pastMonth)).catch((e) => { 
-    console.error("DailyPast Error:", e); 
+    errorLog += `[DailyPast Error: ${e.message}] `;
     return []; 
   });
 
@@ -459,5 +461,6 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     hourlyChart: mapHourlyChart(hourlyPayload),
     dailyHistory: hydratedDailyHistory,
     monthlyHistory,
+    errorLog: errorLog.trim() || undefined,
   };
 }
