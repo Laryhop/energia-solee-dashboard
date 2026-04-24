@@ -347,10 +347,12 @@ async function fetchPlantDetail(session: LoginSession, plantId: string) {
   });
 }
 
-async function fetchPlantPowerByDay(session: LoginSession, plantId: string, count: number) {
+// Substitua a partir desta linha até o final do arquivo:
+
+async function fetchPlantPowerByDay(session: LoginSession, plantId: string, count: number, dateStr?: string) {
   return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPowerAndIncomeByDay", session, {
     powerstation_id: plantId,
-    date: formatDateInput(new Date()),
+    date: dateStr || formatDateInput(new Date()),
     count,
     id: plantId,
   });
@@ -381,10 +383,16 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     throw new Error("Nenhuma usina encontrada para a conta informada.");
   }
 
-  const [detailPayload, hourlyPayload, dailyPayload, monthlyPayload] = await Promise.all([
+  // Truque para pegar os últimos 2 meses: Pede de hoje pra trás, e de 30 dias atrás pra trás
+  const today = new Date();
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(today.getDate() - 30);
+
+  const [detailPayload, hourlyPayload, dailyPayload1, dailyPayload2, monthlyPayload] = await Promise.all([
     fetchPlantDetail(session, plantId),
     fetchPlantHourlyPower(session, plantId).catch(() => ({ pacs: [] })),
-    fetchPlantPowerByDay(session, plantId, 60).catch(() => []),
+    fetchPlantPowerByDay(session, plantId, 31).catch(() => []), // Últimos 31 dias
+    fetchPlantPowerByDay(session, plantId, 31, formatDateInput(thirtyDaysAgo)).catch(() => []), // Mais 31 dias anteriores
     fetchPlantPowerByMonth(session, plantId, 12).catch(() => []),
   ]);
 
@@ -400,10 +408,19 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
       : {};
   const inverters = mapInverters(detail);
   const rawInverters = Array.isArray(detail.inverter) ? detail.inverter : [];
-  const dailyHistory = mapDailyHistory(dailyPayload);
+  
+  // Costura os dois meses, remove duplicados e organiza por data
+  const rawDaily1 = mapDailyHistory(dailyPayload1);
+  const rawDaily2 = mapDailyHistory(dailyPayload2);
+  const mergedDaily = [...rawDaily2, ...rawDaily1];
+  const dailyHistory = mergedDaily
+    .filter((v, i, a) => a.findIndex((v2) => v2.date === v.date) === i)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
   const monthlyHistory = mapDailyHistory(monthlyPayload);
   const todayGenerationKwh = parseNumber(kpi.power);
   const monthGenerationKwh = getMonthGenerationFromDetail(kpi, inverters, rawInverters);
+  
   const hydratedDailyHistory =
     dailyHistory.length > 0
       ? dailyHistory
@@ -432,7 +449,7 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
       resolveStatusLabel(
         parseString((detail.info as Record<string, unknown> | undefined)?.status) ||
           (detail.inverter as Array<Record<string, unknown>> | undefined)?.[0]?.status,
-    ) || "Indefinido",
+      ) || "Indefinido",
     inverters,
     hourlyChart: mapHourlyChart(hourlyPayload),
     dailyHistory: hydratedDailyHistory,
