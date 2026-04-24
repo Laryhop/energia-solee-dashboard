@@ -47,6 +47,7 @@ export type SolarDashboardData = {
     generationKwh: number;
     economyBrl: number;
   }>;
+  errorLog?: string;
 };
 
 let cache: CachedValue | null = null;
@@ -132,6 +133,7 @@ export async function getSolarDashboardData(): Promise<SolarDashboardData> {
         generationKwh: toFixedNumber(item.generationKwh),
         economyBrl: toFixedNumber(item.generationKwh * env.TARIFA_KWH, 2),
       })),
+      errorLog: snapshot.errorLog,
     };
 
     cache = {
