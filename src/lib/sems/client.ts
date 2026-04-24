@@ -400,6 +400,9 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     return []; 
   });
 
+  errorLog += `[Debug CurrentRaw: ${JSON.stringify(dailyCurrentRaw).substring(0, 100)}] `;
+  errorLog += `[Debug PastRaw: ${JSON.stringify(dailyPastRaw).substring(0, 100)}] `;
+
   const detail = unwrapEnvelope<Record<string, unknown>>(detailPayload);
   const location = parseString(
     (detail.info as Record<string, unknown> | undefined)?.address ||
