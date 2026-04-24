@@ -320,7 +320,7 @@ export function DashboardShell() {
           {/* VALOR ESTIMADO */}
           <section className="rounded-[2.5rem] bg-white dark:bg-[#0f1d15] p-8 border border-slate-200 dark:border-emerald-900/30 text-center flex flex-col justify-center">
             <h2 className="text-xl font-black mb-6 dark:text-white">Valor estimado da Usina</h2>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <div className="p-4 rounded-3xl bg-amber-50 dark:bg-amber-900/10 border border-amber-100/50 dark:border-amber-900/30">
                 <p className="text-[9px] font-black uppercase text-amber-700">Hoje</p>
                 <p className="text-lg font-black dark:text-white">{cf.format((summary.todayGenerationKwh || 0) * 0.7)}</p>
