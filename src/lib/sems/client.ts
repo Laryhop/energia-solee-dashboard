@@ -72,8 +72,9 @@ function parseString(value: unknown, fallback = ""): string {
 function resolveStatusLabel(status: unknown): string {
   const numeric = typeof status === "string" && /^-?\d+$/.test(status) ? Number(status) : status;
   if (typeof numeric === "number") {
-    if (numeric === 1) return "Gerando";
-    if (numeric === 0) return "Standby";
+    // Codigos do SEMS (portal antigo e SEMS+): 1 e 5 = normal, 0 e 3 = aguardando.
+    if (numeric === 1 || numeric === 5) return "Gerando";
+    if (numeric === 0 || numeric === 3) return "Standby";
     if (numeric === -1) return "Offline";
     if (numeric === 2) return "Falha";
     return `Status ${numeric}`;

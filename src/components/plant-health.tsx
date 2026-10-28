@@ -12,7 +12,7 @@ import {
 } from "@/lib/format";
 
 type Point = { date: string; generationKwh: number };
-type Inverter = { id: string; name: string; status: string };
+type Inverter = { id: string; name: string; status: string; powerKw?: number };
 
 type Props = {
   today: string;
@@ -44,12 +44,16 @@ function buildAlerts(props: Props, recent: Array<{ date: string; value: number |
   const daylight = hour >= 7 && hour < 17;
 
   // 1. Inversores parados durante o dia
-  const stopped = props.inverters.filter((inv) => inv.status !== "Gerando");
+  // Parado = offline/falha, ou sem potencia nenhuma em horario de sol.
+  // Um codigo de status desconhecido com potencia > 0 nao e tratado como problema.
+  const stopped = props.inverters.filter(
+    (inv) => inv.status === "Offline" || inv.status === "Falha" || !((inv.powerKw ?? 0) > 0),
+  );
   if (daylight && stopped.length) {
     alerts.push({
       level: "danger",
       title: `${stopped.length} inversor${stopped.length > 1 ? "es" : ""} sem gerar agora`,
-      detail: `${stopped.map((inv) => `${inv.name} (${inv.status})`).join(", ")}. Em horário de sol, confira disjuntores, alarmes no SEMS+ e a conexão do inversor.`,
+      detail: `${stopped.map((inv) => `${inv.name} (${inv.status}, ${nf.format(inv.powerKw ?? 0)} kW)`).join(", ")}. Em horário de sol, confira disjuntores, alarmes no SEMS+ e a conexão do inversor.`,
     });
   } else if (daylight && props.plantStatus === "Offline") {
     alerts.push({

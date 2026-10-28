@@ -109,7 +109,7 @@ export function DashboardShell() {
   const todayKwh = summary.todayGenerationKwh || 0;
   const capacityKwp: number | null = summary.capacityKwp || null;
   const weatherDays: WeatherDay[] = weather?.daily || [];
-  const generatingCount = inverters.filter((inv: any) => inv.status === "Gerando").length;
+  const generatingCount = inverters.filter((inv: any) => inv.status === "Gerando" || inv.powerKw > 0).length;
 
   // --- Gráfico de linha (curva de hoje) ---
   const widthLine = 1000;
