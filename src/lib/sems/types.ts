@@ -10,6 +10,7 @@ export type SemsInverter = {
   status: string;
   powerKw: number;
   dayGenerationKwh: number;
+  monthGenerationKwh?: number;
   totalGenerationKwh: number;
 };
 

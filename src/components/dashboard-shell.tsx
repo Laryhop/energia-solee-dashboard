@@ -44,25 +44,46 @@ export function DashboardShell() {
     setIsDark(saved);
     if (saved) document.documentElement.classList.add("dark");
 
+    let hasData = false;
+
     async function loadData() {
       try {
-        const [s, w] = await Promise.all([fetch("/api/solar"), fetch("/api/weather")]);
+        const [s, w] = await Promise.all([
+          fetch("/api/solar", { cache: "no-store" }),
+          fetch("/api/weather"),
+        ]);
         if (s.status === 401 || w.status === 401) {
           window.location.reload();
           return;
         }
         const sData = await s.json();
         const wData = await w.json();
+
+        if (!s.ok || sData?.error) {
+          const message = `${sData?.error || "Falha ao consultar a usina."}${sData?.detail ? ` ${sData.detail}` : ""}`;
+          // Se ja ha dados na tela, mantem os ultimos e so registra o erro.
+          if (hasData) {
+            console.error(message);
+            return;
+          }
+          setState({ status: "error", message });
+          return;
+        }
+
+        hasData = true;
         setState({ status: "success", data: { solar: sData, weather: wData } });
       } catch (e) {
-        setState({ status: "error", message: "Erro ao carregar dados da API." });
+        if (!hasData) setState({ status: "error", message: "Erro ao carregar dados da API." });
       }
     }
+
     loadData();
+    const interval = window.setInterval(loadData, 60_000);
+    return () => window.clearInterval(interval);
   }, []);
 
   if (state.status === "loading") return <div className="flex min-h-screen items-center justify-center dark:bg-[#060d09] dark:text-white font-black animate-pulse uppercase">Sincronizando Usina Solar...</div>;
-  if (state.status === "error") return <div className="flex min-h-screen items-center justify-center text-red-500 font-black">{state.message}</div>;
+  if (state.status === "error") return <div className="flex min-h-screen items-center justify-center px-6 text-center text-red-500 font-black">{state.message}</div>;
 
   const { solar, weather } = state.data;
 

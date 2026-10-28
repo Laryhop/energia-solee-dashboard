@@ -58,6 +58,7 @@ function toFixedNumber(value: number, fractionDigits = 1) {
 
 function formatDayLabel(date: string) {
   return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Maceio",
     day: "2-digit",
     month: "short",
   }).format(new Date(date));
@@ -65,6 +66,7 @@ function formatDayLabel(date: string) {
 
 function formatHourLabel(date: string) {
   return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Maceio",
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(date));

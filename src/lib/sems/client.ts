@@ -1,469 +1,465 @@
+import { createHash } from "node:crypto";
+
 import { getEnv } from "@/lib/env";
 import type {
   SemsDailyPoint,
   SemsHourlyPoint,
   SemsInverter,
-  SemsPlant,
   SemsPlantSnapshot,
 } from "@/lib/sems/types";
 
-const SEMS_BASE_URL = "https://www.semsportal.com/api";
-const SEMS_APP_VERSION = "v2.1.0";
-const SEMS_LANGUAGE = "en";
-const SEMS_CLIENT = "ios";
+/*
+ * Cliente do GoodWe SEMS+.
+ *
+ * Em setembro de 2026 a GoodWe migrou o SEMS Portal para o SEMS+. As rotas
+ * antigas (`www.semsportal.com/api/...`, `PowerStationMonitor/...`,
+ * `v2/PowerStation/GetMonitorDetailByPowerstationId`) passaram a responder
+ * HTTP 200 com `data` vazio ou erro, e o dashboard ficou com zeros/dados
+ * antigos. Este cliente usa a API Web do SEMS+ (a mesma usada por
+ * semsplus.goodwe.com), com base na integracao comunitaria do Home Assistant:
+ * https://github.com/TimSoethout/goodwe-sems-home-assistant
+ */
 
-type LoginSession = {
-  uid: string;
-  timestamp: number;
-  token: string;
+const LOGIN_URL = "https://semsplus.goodwe.com/web/sems/sems-user/api/v1/auth/cross-login";
+const FALLBACK_API_BASE = "https://eu-gateway.semsportal.com/web/sems";
+const SUCCESS_CODES = new Set(["0", "00000"]);
+const AUTH_EXPIRED_CODES = new Set(["100002", "C0602"]);
+const RATE_LIMIT_CODE = "GY0429";
+const REQUEST_TIMEOUT_MS = 8_000;
+const TOKEN_TTL_MS = 30 * 60_000;
+const STATION_TIMEZONE = "America/Maceio";
+const USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+type WebToken = Record<string, unknown> & { api: string; uid?: unknown; token?: unknown };
+
+type SemsEnvelope<T> = {
+  code?: unknown;
+  msg?: unknown;
+  description?: unknown;
+  api?: unknown;
+  data?: T;
 };
 
-function parseNumber(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
+class SemsApiError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
   }
+}
+
+let cachedToken: { token: WebToken; expiresAt: number } | null = null;
+
+// ---------- utilitarios ----------
+
+function parseNumber(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string") {
-    const normalized = value.replace(",", ".").match(/-?\d+(\.\d+)?/);
-    return normalized ? Number(normalized[0]) : 0;
+    const match = value.replace(",", ".").match(/-?\d+(\.\d+)?/);
+    return match ? Number(match[0]) : 0;
   }
   return 0;
 }
 
 function parseString(value: unknown, fallback = ""): string {
-  return typeof value === "string" && value.trim() ? value.trim() : fallback;
-}
-
-function unwrapEnvelope<T>(payload: unknown): T {
-  if (
-    payload &&
-    typeof payload === "object" &&
-    "data" in payload &&
-    (payload as { data?: unknown }).data !== undefined
-  ) {
-    return (payload as { data: T }).data;
-  }
-  return payload as T;
-}
-
-function collectObjects(input: unknown, results: Array<Record<string, unknown>> = []) {
-  if (Array.isArray(input)) {
-    input.forEach((item) => collectObjects(item, results));
-    return results;
-  }
-  if (input && typeof input === "object") {
-    const record = input as Record<string, unknown>;
-    results.push(record);
-    Object.values(record).forEach((value) => collectObjects(value, results));
-  }
-  return results;
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return fallback;
 }
 
 function resolveStatusLabel(status: unknown): string {
-  if (typeof status === "number") {
-    if (status === 1) return "Gerando";
-    if (status === 0) return "Standby";
-    if (status === -1) return "Offline";
-    if (status === 2) return "Falha";
-    return `Status ${status}`;
+  const numeric = typeof status === "string" && /^-?\d+$/.test(status) ? Number(status) : status;
+  if (typeof numeric === "number") {
+    if (numeric === 1) return "Gerando";
+    if (numeric === 0) return "Standby";
+    if (numeric === -1) return "Offline";
+    if (numeric === 2) return "Falha";
+    return `Status ${numeric}`;
   }
   return parseString(status, "Indefinido");
 }
 
-function toIsoDate(input: string) {
-  const parsed = new Date(input);
-  if (!Number.isNaN(parsed.getTime())) {
-    return parsed.toISOString();
-  }
-  return input;
+/** Data/hora no fuso da usina, no formato aceito pelo SEMS+ ("YYYY-MM-DD HH:mm:ss"). */
+function localDate(date: Date) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: STATION_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
 }
 
-async function semsRequest<T>(
-  path: string,
-  session: LoginSession,
-  payload: Record<string, unknown>,
-) {
-  const tokenHeader = JSON.stringify({
-    uid: session.uid,
-    timestamp: session.timestamp,
-    token: session.token,
-    client: SEMS_CLIENT,
-    version: SEMS_APP_VERSION,
-    language: SEMS_LANGUAGE,
-  });
-
-  const response = await fetch(`${SEMS_BASE_URL}/${path}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Token: tokenHeader,
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: JSON.stringify(payload),
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`SEMS respondeu com ${response.status} em ${path}.`);
-  }
-
-  return (await response.json()) as T;
-}
-
-async function login(): Promise<LoginSession> {
-  const env = getEnv();
-  const response = await fetch(`${SEMS_BASE_URL}/v2/Common/CrossLogin`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Token: JSON.stringify({
-        client: SEMS_CLIENT,
-        version: SEMS_APP_VERSION,
-        language: SEMS_LANGUAGE,
-      }),
-      "User-Agent": "Mozilla/5.0",
-    },
-    body: JSON.stringify({
-      account: env.SEMS_USER,
-      pwd: env.SEMS_PASS,
-    }),
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(`Falha no login do SEMS (${response.status}).`);
-  }
-
-  const payload = unwrapEnvelope<Record<string, unknown>>(await response.json());
-  const uid = parseString(payload.uid);
-  const token = parseString(payload.token);
-  const timestamp = parseNumber(payload.timestamp);
-
-  if (!uid || !token || !timestamp) {
-    throw new Error("Nao foi possivel obter sessao valida no SEMS.");
-  }
-
-  return { uid, token, timestamp };
-}
-
-function extractPlants(payload: unknown): SemsPlant[] {
-  const candidates = collectObjects(payload)
-    .map((item) => {
-      const id =
-        parseString(item.powerstation_id) ||
-        parseString(item.powerStationId) ||
-        parseString(item.id);
-      const name =
-        parseString(item.stationname) ||
-        parseString(item.stationName) ||
-        parseString(item.name);
-
-      if (!id || !name) {
-        return null;
-      }
-
-      return { id, name };
-    })
-    .filter((item): item is SemsPlant => Boolean(item));
-
-  return candidates.filter(
-    (plant, index, list) => list.findIndex((entry) => entry.id === plant.id) === index,
-  );
-}
-
-async function listPlants(session: LoginSession): Promise<SemsPlant[]> {
-  const attempts = [
-    { path: "PowerStationMonitor/QueryPowerStationMonitorForAppNew", payload: {} },
-    { path: "PowerStationMonitor/QueryPowerStationMonitorForApp", payload: {} },
-    { path: "OpenApi/GetUserPowerStation", payload: {} },
-  ];
-
-  for (const attempt of attempts) {
-    try {
-      const result = await semsRequest<unknown>(attempt.path, session, attempt.payload);
-      const plants = extractPlants(unwrapEnvelope(result));
-
-      if (plants.length) {
-        return plants;
-      }
-    } catch {
-      // tenta a proxima rota conhecida
-    }
-  }
-
-  throw new Error(
-    "Nao foi possivel descobrir a usina automaticamente. Defina SEMS_PLANT_ID no ambiente.",
-  );
-}
-
-function mapInverters(payload: unknown): SemsInverter[] {
-  const unwrapped = unwrapEnvelope<Record<string, unknown>>(payload);
-  const rawInverters = Array.isArray(unwrapped.inverter) ? unwrapped.inverter : [];
-
-  return rawInverters.map((item, index) => {
-    const record = item as Record<string, unknown>;
-    const details =
-      record.invert_full && typeof record.invert_full === "object"
-        ? (record.invert_full as Record<string, unknown>)
-        : {};
-
-    return {
-      id:
-        parseString(record.id) ||
-        parseString(record.powerstation_id) ||
-        parseString(details.sn) ||
-        `inverter-${index + 1}`,
-      name:
-        parseString(record.name) ||
-        parseString(record.inverter_name) ||
-        parseString(details.sn, `Inversor ${index + 1}`),
-      serialNumber: parseString(details.sn) || null,
-      status: resolveStatusLabel(record.status),
-      powerKw: parseNumber(record.power || details.pac || details.ppv) / 1000,
-      dayGenerationKwh: parseNumber(record.day_generation || details.eday || record.etoday),
-      totalGenerationKwh: parseNumber(
-        record.total_generation || details.etotal || record.etotal,
-      ),
-    };
-  });
-}
-
-function getMonthGenerationFromDetail(
-  kpi: Record<string, unknown>,
-  inverters: SemsInverter[],
-  rawInverters: unknown[],
-) {
-  const fromKpi =
-    parseNumber(kpi.month_power) ||
-    parseNumber(kpi.month_generation) ||
-    parseNumber(kpi.monthPower) ||
-    parseNumber(kpi.monthGeneration);
-
-  if (fromKpi > 0) {
-    return fromKpi;
-  }
-
-  const fromRawInverters = rawInverters.reduce<number>((total, item) => {
-    const record = item as Record<string, unknown>;
-    const details =
-      record.invert_full && typeof record.invert_full === "object"
-        ? (record.invert_full as Record<string, unknown>)
-        : {};
-
-    return (
-      total +
-      parseNumber(
-        record.month_generation ||
-          record.monthGeneration ||
-          details.emonth ||
-          details.month_generation,
-      )
-    );
-  }, 0);
-
-  if (fromRawInverters > 0) {
-    return fromRawInverters;
-  }
-
-  return inverters.reduce((total, inverter) => total + inverter.dayGenerationKwh, 0);
-}
-
-function mapHourlyChart(payload: unknown): SemsHourlyPoint[] {
-  const data = unwrapEnvelope<Record<string, unknown>>(payload);
-  const pacs = Array.isArray(data.pacs) ? data.pacs : [];
-
-  return pacs
-    .map((item) => {
-      const record = item as Record<string, unknown>;
-      const timestamp = parseString(record.date);
-      return {
-        timestamp: toIsoDate(timestamp),
-        powerKw: parseNumber(record.pac) / 1000,
-      };
-    })
-    .filter((point) => point.timestamp)
-    .sort((left, right) => left.timestamp.localeCompare(right.timestamp));
-}
-
-function mapDailyHistory(payload: unknown): SemsDailyPoint[] {
-  const data = unwrapEnvelope<unknown>(payload);
-  const directRows = Array.isArray(data)
-    ? data
-    : Array.isArray((data as { list?: unknown[] })?.list)
-      ? ((data as { list: unknown[] }).list ?? [])
-      : [];
-  const rows =
-    directRows.length > 0
-      ? directRows
-      : collectObjects(data).filter((item) => {
-          const hasDateLikeField = Boolean(
-            parseString(item.date) || parseString(item.day) || parseString(item.month) || parseString(item.d),
-          );
-          const hasPowerLikeField = [
-            item.p,
-            item.power,
-            item.value,
-            item.generation,
-            item.generationKwh,
-          ].some((value) => parseNumber(value) > 0);
-
-          return hasDateLikeField && hasPowerLikeField;
-        });
-
-  return rows
-    .map((item) => {
-      const record = item as Record<string, unknown>;
-      const rawDate =
-        parseString(record.date) || parseString(record.day) || parseString(record.month) || parseString(record.d);
-
-      return {
-        date: rawDate ? toIsoDate(rawDate) : rawDate,
-        generationKwh: parseNumber(
-          record.p ||
-            record.power ||
-            record.value ||
-            record.generation ||
-            record.generationKwh,
-        ),
-      };
-    })
-    .filter((item) => item.date)
-    .sort((left, right) => left.date.localeCompare(right.date));
-}
-
-function formatDateInput(date: Date) {
+function addDays(dateStr: string, days: number) {
+  const date = new Date(`${dateStr}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
   return date.toISOString().slice(0, 10);
 }
 
-async function fetchPlantDetail(session: LoginSession, plantId: string) {
-  return semsRequest<unknown>("v2/PowerStation/GetMonitorDetailByPowerstationId", session, {
-    powerStationId: plantId,
-  });
+function md5Base64(password: string) {
+  const hex = createHash("md5").update(password, "utf8").digest("hex");
+  return Buffer.from(hex, "utf8").toString("base64");
 }
 
-// A ROTA CORRETA É GetPowerStationPowerAndIncomeByDay passando a data de início e a contagem.
-async function fetchPlantPowerByDay(session: LoginSession, plantId: string, count: number, dateStr?: string) {
-  return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPowerAndIncomeByDay", session, {
-    powerstation_id: plantId,
-    date: dateStr || formatDateInput(new Date()),
-    count,
-    id: plantId,
-  });
+function signature(token: Record<string, unknown>) {
+  const epochMs = Date.now();
+  const digest = createHash("sha256")
+    .update(`${epochMs}@${parseString(token.uid)}@${parseString(token.token)}`)
+    .digest("hex");
+  return Buffer.from(`${digest}@${epochMs}`, "utf8").toString("base64");
 }
 
-async function fetchPlantPowerByMonth(session: LoginSession, plantId: string, count: number) {
-  return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPowerAndIncomeByMonth", session, {
-    powerstation_id: plantId,
-    date: formatDateInput(new Date()),
-    count,
-    id: plantId,
+async function fetchJson<T>(url: string, init: RequestInit): Promise<SemsEnvelope<T>> {
+  const response = await fetch(url, {
+    ...init,
+    cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
+
+  if (response.status === 429) {
+    throw new SemsApiError("SEMS+ limitou as requisicoes (HTTP 429). Tente novamente em alguns minutos.", RATE_LIMIT_CODE);
+  }
+  if (!response.ok) {
+    throw new SemsApiError(`SEMS+ respondeu HTTP ${response.status} em ${new URL(url).pathname}.`);
+  }
+
+  return (await response.json()) as SemsEnvelope<T>;
 }
 
-async function fetchPlantHourlyPower(session: LoginSession, plantId: string) {
-  return semsRequest<unknown>("PowerStationMonitor/GetPowerStationPacByDayForApp", session, {
-    id: plantId,
-    date: formatDateInput(new Date()),
+function assertSuccess(payload: SemsEnvelope<unknown>, operation: string) {
+  const code = parseString(payload.code);
+  if (SUCCESS_CODES.has(code)) return;
+
+  const message = parseString(payload.msg) || parseString(payload.description) || "erro desconhecido";
+  if (code === RATE_LIMIT_CODE) {
+    throw new SemsApiError(`SEMS+ limitou as requisicoes em ${operation}. Tente novamente em alguns minutos.`, code);
+  }
+  throw new SemsApiError(`${operation} falhou (codigo ${code || "?"}: ${message}).`, code);
+}
+
+// ---------- autenticacao ----------
+
+async function login(): Promise<WebToken> {
+  const env = getEnv();
+  const payload = await fetchJson<Record<string, unknown>>(LOGIN_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/plain, */*",
+      Origin: "https://semsplus.goodwe.com",
+      Referer: "https://semsplus.goodwe.com/",
+      Token: '{"uid":"","timestamp":0,"token":"","client":"semsPlusWeb","version":"","language":"en"}',
+      "X-Signature": signature({}),
+      "User-Agent": USER_AGENT,
+    },
+    body: JSON.stringify({
+      account: env.SEMS_USER,
+      pwd: md5Base64(env.SEMS_PASS),
+      agreement: 1,
+      isChinese: false,
+      isLocal: false,
+    }),
   });
+
+  try {
+    assertSuccess(payload, "Login no SEMS+");
+  } catch (error) {
+    throw new SemsApiError(
+      `${(error as Error).message} Confira SEMS_USER/SEMS_PASS e se a conta entra em https://semsplus.goodwe.com (aceite os termos la uma vez).`,
+      (error as SemsApiError).code,
+    );
+  }
+
+  const data = payload.data && typeof payload.data === "object" ? payload.data : {};
+  if (!parseString(data.token)) {
+    throw new SemsApiError("Login no SEMS+ nao retornou token.");
+  }
+
+  const api = parseString(payload.api) || parseString(data.api) || FALLBACK_API_BASE;
+  return { ...data, api: api.replace(/\/+$/, "") };
+}
+
+async function getToken(forceRefresh = false) {
+  if (!forceRefresh && cachedToken && Date.now() < cachedToken.expiresAt) {
+    return cachedToken.token;
+  }
+  const token = await login();
+  cachedToken = { token, expiresAt: Date.now() + TOKEN_TTL_MS };
+  return token;
+}
+
+async function webRequest<T>(
+  path: string,
+  options: { method?: "GET" | "POST"; body?: unknown; operation: string },
+  retried = false,
+): Promise<T> {
+  const token = await getToken(retried);
+  const payload = await fetchJson<T>(`${token.api}${path}`, {
+    method: options.method ?? "GET",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      token: JSON.stringify(token),
+      "X-Signature": signature(token),
+      "User-Agent": USER_AGENT,
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+
+  const code = parseString(payload.code);
+  if (AUTH_EXPIRED_CODES.has(code) && !retried) {
+    cachedToken = null;
+    return webRequest<T>(path, options, true);
+  }
+
+  assertSuccess(payload, options.operation);
+  return payload.data as T;
+}
+
+// ---------- endpoints ----------
+
+type StationRow = Record<string, unknown>;
+
+async function listStations(): Promise<StationRow[]> {
+  const data = await webRequest<{ dataList?: StationRow[] }>("/sems-plant/api/portal/stations/page", {
+    method: "POST",
+    body: { current: 1, size: 100 },
+    operation: "Lista de usinas",
+  });
+  return Array.isArray(data?.dataList) ? data.dataList : [];
+}
+
+async function getStationFlow(stationId: string) {
+  return webRequest<Record<string, unknown>>(
+    `/sems-plant/api/stations/flow?stationId=${encodeURIComponent(stationId)}`,
+    { operation: "Fluxo de potencia" },
+  );
+}
+
+type DeviceInfo = { sn: string; name: string; status: unknown; deviceType: string };
+
+async function getInverterDevices(stationId: string): Promise<DeviceInfo[]> {
+  const data = await webRequest<{ deviceDetailList?: Array<Record<string, unknown>> }>(
+    `/sems-plant/api/stations/device/all-status?stationId=${encodeURIComponent(stationId)}`,
+    { operation: "Lista de inversores" },
+  );
+
+  const devices: DeviceInfo[] = [];
+  for (const group of data?.deviceDetailList ?? []) {
+    const deviceType = parseString(group.deviceType);
+    if (deviceType !== "INVERTER" && deviceType !== "ENERGY_STORAGE_INTEGRATED_CABINET") continue;
+
+    const statusGroups = Array.isArray(group.statusDetailList) ? group.statusDetailList : [];
+    for (const statusGroup of statusGroups as Array<Record<string, unknown>>) {
+      const detailMap = (statusGroup.detailMap ?? {}) as Record<string, Record<string, unknown>>;
+      const snList = Array.isArray(statusGroup.snList) ? statusGroup.snList : [];
+      for (const sn of snList) {
+        if (typeof sn !== "string") continue;
+        const detail = detailMap[sn] ?? {};
+        devices.push({
+          sn,
+          name: parseString(detail.name, sn),
+          status: statusGroup.status ?? detail.status,
+          deviceType,
+        });
+      }
+    }
+  }
+  return devices;
+}
+
+/** Achata os grupos de "factors" do SEMS+ em { codigo: valor }. */
+function flattenFactors(data: unknown) {
+  const factors: Record<string, unknown> = {};
+  for (const group of Array.isArray(data) ? data : []) {
+    const list = (group as { factors?: unknown }).factors;
+    for (const factor of Array.isArray(list) ? list : []) {
+      const record = factor as Record<string, unknown>;
+      const code = parseString(record.code);
+      if (code && !(code in factors)) factors[code] = record.data;
+    }
+  }
+  return factors;
+}
+
+async function getInverterCounters(stationId: string, device: DeviceInfo): Promise<SemsInverter> {
+  const data = await webRequest<unknown>(
+    `/sems-plant/api/equipments/${encodeURIComponent(device.sn)}/telecounting?deviceType=${device.deviceType}&pwId=${encodeURIComponent(stationId)}`,
+    { operation: `Contadores do inversor ${device.sn}` },
+  );
+  const factors = flattenFactors(data);
+
+  return {
+    id: device.sn,
+    name: device.name,
+    serialNumber: device.sn,
+    status: resolveStatusLabel(device.status),
+    powerKw: parseNumber(factors.pAc),
+    dayGenerationKwh: parseNumber(factors.proPvStatsToday),
+    monthGenerationKwh: parseNumber(factors.proPvStatsMonth),
+    totalGenerationKwh: parseNumber(factors.proPvStatsTotal),
+  };
+}
+
+/**
+ * Producao por dia ("day") ou por mes ("month") entre duas datas.
+ * Retorna a serie `proSystemTotalStats` (geracao da usina em kWh).
+ */
+async function getProductionSeries(
+  stationId: string,
+  dimension: "day" | "month",
+  startDate: string,
+  endDate: string,
+): Promise<SemsDailyPoint[]> {
+  const data = await webRequest<{ dataList?: Array<Record<string, unknown>> }>(
+    "/sems-plant/api/stations/statistics",
+    {
+      method: "POST",
+      body: {
+        stationId,
+        isReport: false,
+        items: ["proSystemTotalStats"],
+        dimension,
+        startTime: `${startDate} 00:00:00`,
+        endTime: `${endDate} 23:59:59`,
+      },
+      operation: `Historico por ${dimension === "day" ? "dia" : "mes"}`,
+    },
+  );
+
+  const series = (data?.dataList ?? []).find((item) => item.item === "proSystemTotalStats");
+  const rows = Array.isArray(series?.statisticsList) ? series.statisticsList : [];
+
+  return (rows as Array<Record<string, unknown>>)
+    .map((row) => {
+      const date = parseString(row.date);
+      // "2026-09-24" ou "2026-09" -> ISO ao meio-dia para nao "voltar" um dia por causa do fuso.
+      const iso = /^\d{4}-\d{2}$/.test(date) ? `${date}-01T12:00:00.000Z` : `${date.slice(0, 10)}T12:00:00.000Z`;
+      return { date: date ? iso : "", generationKwh: parseNumber(row.val) };
+    })
+    .filter((row) => row.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// ---------- curva de potencia do dia ----------
+
+/*
+ * O SEMS+ ainda nao tem rota publica conhecida para a curva de potencia do dia.
+ * Por isso a curva e montada a partir das leituras de potencia que o proprio
+ * dashboard faz (a cada atualizacao). Ela recomeca a cada dia e enquanto o
+ * servidor estiver ativo; numa hospedagem serverless pode ter lacunas.
+ */
+const powerReadings = new Map<string, SemsHourlyPoint[]>();
+
+function recordPowerReading(stationId: string, powerKw: number, at: Date) {
+  const day = localDate(at);
+  const key = `${stationId}:${day}`;
+  for (const existing of powerReadings.keys()) {
+    if (existing.startsWith(`${stationId}:`) && existing !== key) powerReadings.delete(existing);
+  }
+  const points = powerReadings.get(key) ?? [];
+  const last = points.at(-1);
+  if (!last || at.getTime() - new Date(last.timestamp).getTime() >= 60_000) {
+    points.push({ timestamp: at.toISOString(), powerKw });
+  }
+  powerReadings.set(key, points.slice(-1_440));
+  return [...points];
+}
+
+// ---------- snapshot ----------
+
+async function optional<T>(promise: Promise<T>, fallback: T, label: string, errors: string[]) {
+  try {
+    return await promise;
+  } catch (error) {
+    errors.push(`[${label}: ${error instanceof Error ? error.message : String(error)}]`);
+    return fallback;
+  }
 }
 
 export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
   const env = getEnv();
-  const session = await login();
-  const plantId = env.SEMS_PLANT_ID || (await listPlants(session))[0]?.id;
+  const errors: string[] = [];
 
-  if (!plantId) {
-    throw new Error("Nenhuma usina encontrada para a conta informada.");
+  const stations = await listStations();
+  const station = env.SEMS_PLANT_ID
+    ? stations.find((item) => parseString(item.id) === env.SEMS_PLANT_ID)
+    : stations[0];
+  const stationId = env.SEMS_PLANT_ID || parseString(station?.id);
+
+  if (!stationId) {
+    throw new SemsApiError("Nenhuma usina encontrada na conta SEMS+.");
+  }
+  if (env.SEMS_PLANT_ID && !station) {
+    errors.push(`[A usina ${env.SEMS_PLANT_ID} nao apareceu na lista da conta; confira SEMS_PLANT_ID.]`);
   }
 
-  // 1. Busca os detalhes principais em paralelo
-  const [detailPayload, hourlyPayload, monthlyPayload] = await Promise.all([
-    fetchPlantDetail(session, plantId),
-    fetchPlantHourlyPower(session, plantId).catch((e) => { console.error("Hourly Error:", e); return { pacs: [] }; }),
-    fetchPlantPowerByMonth(session, plantId, 12).catch((e) => { console.error("Monthly Error:", e); return []; })
+  const today = localDate(new Date());
+  const historyStart = addDays(today, -59);
+  const yearAgo = `${addDays(today, -365).slice(0, 7)}-01`;
+
+  const [flow, devices, dailyHistory, monthlyHistory] = await Promise.all([
+    optional(getStationFlow(stationId), {} as Record<string, unknown>, "Fluxo", errors),
+    optional(getInverterDevices(stationId), [] as DeviceInfo[], "Inversores", errors),
+    optional(getProductionSeries(stationId, "day", historyStart, today), [], "Historico diario", errors),
+    optional(getProductionSeries(stationId, "month", yearAgo, today), [], "Historico mensal", errors),
   ]);
-  
-  // 2. Busca o histórico sequencialmente em blocos de 31 dias para evitar o bloqueio antibot da GoodWe, 
-  // mas como o Passo 1 foi paralelo, teremos tempo de sobra antes do timeout de 10s do Vercel.
-  const today = new Date();
-  const pastMonth = new Date();
-  pastMonth.setDate(today.getDate() - 31);
-  
-  let errorLog = "";
 
-  const dailyCurrentRaw = await fetchPlantPowerByDay(session, plantId, 31, formatDateInput(today)).catch((e) => { 
-    errorLog += `[DailyCurrent Error: ${e.message}] `;
-    return []; 
-  });
-  
-  const dailyPastRaw = await fetchPlantPowerByDay(session, plantId, 31, formatDateInput(pastMonth)).catch((e) => { 
-    errorLog += `[DailyPast Error: ${e.message}] `;
-    return []; 
-  });
-
-
-  const detail = unwrapEnvelope<Record<string, unknown>>(detailPayload);
-  const location = parseString(
-    (detail.info as Record<string, unknown> | undefined)?.address ||
-      (detail.info as Record<string, unknown> | undefined)?.location ||
-      (detail.info as Record<string, unknown> | undefined)?.city,
+  const inverters = await Promise.all(
+    devices.map((device) =>
+      optional(
+        getInverterCounters(stationId, device),
+        {
+          id: device.sn,
+          name: device.name,
+          serialNumber: device.sn,
+          status: resolveStatusLabel(device.status),
+          powerKw: 0,
+          dayGenerationKwh: 0,
+          monthGenerationKwh: 0,
+          totalGenerationKwh: 0,
+        },
+        `Inversor ${device.sn}`,
+        errors,
+      ),
+    ),
   );
-  const kpi =
-    detail.kpi && typeof detail.kpi === "object"
-      ? (detail.kpi as Record<string, unknown>)
-      : {};
-  const inverters = mapInverters(detail);
-  const rawInverters = Array.isArray(detail.inverter) ? detail.inverter : [];
-  
-  // Extrai os dados da requisição (ByDay e ByMonth caso ByMonth também retorne dias como fallback)
-  const currentDaily = mapDailyHistory(dailyCurrentRaw);
-  const pastDaily = mapDailyHistory(dailyPastRaw);
-  const monthDailyFallback = mapDailyHistory(monthlyPayload);
-  
-  // Remove possíveis dias duplicados e ordena
-  const mergedDaily = [...pastDaily, ...currentDaily, ...monthDailyFallback];
-  const dailyHistory = mergedDaily
-    .filter((v, i, a) => a.findIndex((v2) => v2.date === v.date) === i)
-    .sort((a, b) => a.date.localeCompare(b.date));
 
-  const monthlyHistory = mapDailyHistory(monthlyPayload);
-  const todayGenerationKwh = parseNumber(kpi.power);
-  const monthGenerationKwh = getMonthGenerationFromDetail(kpi, inverters, rawInverters);
-  
-  const hydratedDailyHistory =
-    dailyHistory.length > 0
-      ? dailyHistory
-      : todayGenerationKwh > 0
-        ? [
-            {
-              date: new Date().toISOString(),
-              generationKwh: todayGenerationKwh,
-            },
-          ]
-        : [];
+  const sum = (pick: (inv: SemsInverter) => number) => inverters.reduce((total, inv) => total + pick(inv), 0);
+  const todayFromHistory = dailyHistory.find((row) => row.date.startsWith(today))?.generationKwh ?? 0;
+  const currentMonth = today.slice(0, 7);
+  const monthFromHistory = dailyHistory
+    .filter((row) => row.date.startsWith(currentMonth))
+    .reduce((total, row) => total + row.generationKwh, 0);
+  const monthFromMonthly = monthlyHistory.find((row) => row.date.startsWith(currentMonth))?.generationKwh ?? 0;
+
+  const currentPowerKw =
+    parseNumber(flow.pSystem) || parseNumber(flow.pAc) || parseNumber(station?.pSystem) || sum((inv) => inv.powerKw);
+  const todayGenerationKwh =
+    parseNumber(station?.productionToday) || sum((inv) => inv.dayGenerationKwh) || todayFromHistory;
+  const monthGenerationKwh = monthFromMonthly || sum((inv) => inv.monthGenerationKwh ?? 0) || monthFromHistory;
+  const totalGenerationKwh = parseNumber(station?.productionTotal) || sum((inv) => inv.totalGenerationKwh);
+
+  // Garante que o dia de hoje aparece no historico mesmo antes da estatistica fechar.
+  const history = [...dailyHistory];
+  if (todayGenerationKwh > 0 && !history.some((row) => row.date.startsWith(today))) {
+    history.push({ date: `${today}T12:00:00.000Z`, generationKwh: todayGenerationKwh });
+  }
 
   return {
-    plantId,
-    plantName:
-      parseString(
-        (detail.info as Record<string, unknown> | undefined)?.stationname ||
-          (detail.info as Record<string, unknown> | undefined)?.name,
-      ) || "Usina Solar",
-    location: location || null,
-    totalGenerationKwh: parseNumber(kpi.total_power),
+    plantId: stationId,
+    plantName: parseString(station?.name) || parseString(flow.name) || "Usina Solar",
+    location: parseString(station?.googleAddress) || null,
+    totalGenerationKwh,
     todayGenerationKwh,
     monthGenerationKwh,
-    currentPowerKw: inverters.length > 0 
-      ? inverters.reduce((sum, inv) => sum + inv.powerKw, 0)
-      : parseNumber(kpi.pac || detail.power) / 1000,
-    status:
-      resolveStatusLabel(
-        parseString((detail.info as Record<string, unknown> | undefined)?.status) ||
-          (detail.inverter as Array<Record<string, unknown>> | undefined)?.[0]?.status,
-      ) || "Indefinido",
+    currentPowerKw,
+    status: resolveStatusLabel(flow.status ?? station?.status),
     inverters,
-    hourlyChart: mapHourlyChart(hourlyPayload),
-    dailyHistory: hydratedDailyHistory,
+    hourlyChart: recordPowerReading(stationId, currentPowerKw, new Date()),
+    dailyHistory: history,
     monthlyHistory,
-    errorLog: errorLog.trim() || undefined,
+    errorLog: errors.join(" ") || undefined,
   };
 }
