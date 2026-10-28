@@ -1,20 +1,21 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
+import { AUTH_COOKIE, getAuthToken, getDashboardPassword } from "@/lib/auth";
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
     const password = body.password;
     
-    // Default password for easy setup.
-    // The user should set DASHBOARD_PASSWORD in Vercel to change this.
-    const correctPassword = process.env.DASHBOARD_PASSWORD || "solee2026";
+    const correctPassword = getDashboardPassword();
     
     if (password === correctPassword) {
       const cookieStore = await cookies();
-      cookieStore.set("solee_auth", "1", { 
+      cookieStore.set(AUTH_COOKIE, getAuthToken(), { 
         httpOnly: true, 
         secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
         maxAge: 60 * 60 * 24 * 30, // 30 dias
         path: "/"
       });

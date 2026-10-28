@@ -369,6 +369,13 @@ function recordPowerReading(stationId: string, powerKw: number, at: Date) {
 
 // ---------- snapshot ----------
 
+function todayFromLive(station: StationRow | undefined, inverters: SemsInverter[]) {
+  return (
+    parseNumber(station?.productionToday) ||
+    inverters.reduce((total, inv) => total + inv.dayGenerationKwh, 0)
+  );
+}
+
 async function optional<T>(promise: Promise<T>, fallback: T, label: string, errors: string[]) {
   try {
     return await promise;
@@ -378,32 +385,122 @@ async function optional<T>(promise: Promise<T>, fallback: T, label: string, erro
   }
 }
 
-export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
-  const env = getEnv();
-  const errors: string[] = [];
+let stationCache: { expiresAt: number; id: string; row: StationRow | undefined; warning?: string } | null = null;
 
+/** Descobre a usina (SEMS_PLANT_ID ou a primeira da conta), com cache de 10 minutos. */
+async function resolveStation(forceRefresh = false) {
+  if (!forceRefresh && stationCache && Date.now() < stationCache.expiresAt) return stationCache;
+
+  const env = getEnv();
   const stations = await listStations();
-  const station = env.SEMS_PLANT_ID
+  const row = env.SEMS_PLANT_ID
     ? stations.find((item) => parseString(item.id) === env.SEMS_PLANT_ID)
     : stations[0];
-  const stationId = env.SEMS_PLANT_ID || parseString(station?.id);
+  const id = env.SEMS_PLANT_ID || parseString(row?.id);
 
-  if (!stationId) {
+  if (!id) {
     throw new SemsApiError("Nenhuma usina encontrada na conta SEMS+.");
   }
-  if (env.SEMS_PLANT_ID && !station) {
-    errors.push(`[A usina ${env.SEMS_PLANT_ID} nao apareceu na lista da conta; confira SEMS_PLANT_ID.]`);
+
+  stationCache = {
+    expiresAt: Date.now() + 10 * 60_000,
+    id,
+    row,
+    warning:
+      env.SEMS_PLANT_ID && !row
+        ? `[A usina ${env.SEMS_PLANT_ID} nao apareceu na lista da conta; confira SEMS_PLANT_ID.]`
+        : undefined,
+  };
+  return stationCache;
+}
+
+// ---------- historico por periodo ----------
+
+/** Quebra o intervalo em blocos: mes a mes (dimensao dia) ou ano a ano (dimensao mes). */
+function splitRange(dimension: "day" | "month", start: string, end: string) {
+  const chunks: Array<[string, string]> = [];
+  let cursor = start;
+  while (cursor <= end) {
+    const [year, month] = cursor.split("-").map(Number);
+    const chunkEnd =
+      dimension === "day"
+        ? new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10)
+        : `${year}-12-31`;
+    const last = chunkEnd < end ? chunkEnd : end;
+    chunks.push([cursor, last]);
+    cursor = addDays(last, 1);
   }
+  return chunks;
+}
+
+const historyCache = new Map<string, { expiresAt: number; data: SemsDailyPoint[] }>();
+
+/**
+ * Producao da usina entre duas datas (YYYY-MM-DD), por dia ou por mes.
+ * Periodos fechados ficam 6h em cache; periodos que incluem hoje, 5 minutos.
+ */
+export async function getSemsProductionHistory(
+  dimension: "day" | "month",
+  start: string,
+  end: string,
+): Promise<SemsDailyPoint[]> {
+  const { id } = await resolveStation();
+  const today = localDate(new Date());
+  const cappedEnd = end > today ? today : end;
+  const key = `${id}:${dimension}:${start}:${cappedEnd}`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() < cached.expiresAt) return cached.data;
+
+  const chunks = splitRange(dimension, start, cappedEnd);
+  const results: SemsDailyPoint[][] = [];
+  // No maximo 3 requisicoes simultaneas para nao ser bloqueado pelo SEMS+.
+  for (let index = 0; index < chunks.length; index += 3) {
+    const batch = chunks.slice(index, index + 3);
+    results.push(
+      ...(await Promise.all(
+        batch.map(([chunkStart, chunkEnd]) => getProductionSeries(id, dimension, chunkStart, chunkEnd)),
+      )),
+    );
+  }
+
+  const seen = new Set<string>();
+  const data = results
+    .flat()
+    .filter((row) => {
+      const dayKey = row.date.slice(0, dimension === "day" ? 10 : 7);
+      if (seen.has(dayKey)) return false;
+      seen.add(dayKey);
+      return true;
+    })
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  if (historyCache.size > 200) historyCache.clear();
+  historyCache.set(key, {
+    expiresAt: Date.now() + (cappedEnd < today ? 6 * 3_600_000 : 5 * 60_000),
+    data,
+  });
+  return data;
+}
+
+export function getStationToday() {
+  return localDate(new Date());
+}
+
+export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
+  const errors: string[] = [];
+  const { id: stationId, row: station, warning } = await resolveStation();
+  if (warning) errors.push(warning);
 
   const today = localDate(new Date());
   const historyStart = addDays(today, -59);
-  const yearAgo = `${addDays(today, -365).slice(0, 7)}-01`;
+  // Desde 1º de janeiro do ano passado, para comparar o ano atual com o anterior.
+  const yearAgo = `${Number(today.slice(0, 4)) - 1}-01-01`;
 
   const [flow, devices, dailyHistory, monthlyHistory] = await Promise.all([
     optional(getStationFlow(stationId), {} as Record<string, unknown>, "Fluxo", errors),
     optional(getInverterDevices(stationId), [] as DeviceInfo[], "Inversores", errors),
-    optional(getProductionSeries(stationId, "day", historyStart, today), [], "Historico diario", errors),
-    optional(getProductionSeries(stationId, "month", yearAgo, today), [], "Historico mensal", errors),
+    optional(getSemsProductionHistory("day", historyStart, today), [], "Historico diario", errors),
+    optional(getSemsProductionHistory("month", yearAgo, today), [], "Historico mensal", errors),
   ]);
 
   const inverters = await Promise.all(
@@ -438,7 +535,13 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     parseNumber(flow.pSystem) || parseNumber(flow.pAc) || parseNumber(station?.pSystem) || sum((inv) => inv.powerKw);
   const todayGenerationKwh =
     parseNumber(station?.productionToday) || sum((inv) => inv.dayGenerationKwh) || todayFromHistory;
-  const monthGenerationKwh = monthFromMonthly || sum((inv) => inv.monthGenerationKwh ?? 0) || monthFromHistory;
+  // A estatistica mensal costuma nao incluir o dia de hoje; usa a maior das fontes.
+  const todayInHistory = dailyHistory.some((row) => row.date.startsWith(today));
+  const monthGenerationKwh = Math.max(
+    monthFromMonthly + (todayInHistory ? 0 : todayFromLive(station, inverters)),
+    sum((inv) => inv.monthGenerationKwh ?? 0),
+    monthFromHistory + (todayInHistory ? 0 : todayFromLive(station, inverters)),
+  );
   const totalGenerationKwh = parseNumber(station?.productionTotal) || sum((inv) => inv.totalGenerationKwh);
 
   // Garante que o dia de hoje aparece no historico mesmo antes da estatistica fechar.
@@ -451,6 +554,7 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     plantId: stationId,
     plantName: parseString(station?.name) || parseString(flow.name) || "Usina Solar",
     location: parseString(station?.googleAddress) || null,
+    capacityKwp: parseNumber(station?.installedPower) || parseNumber(station?.pvInstallP) || null,
     totalGenerationKwh,
     todayGenerationKwh,
     monthGenerationKwh,

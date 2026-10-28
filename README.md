@@ -14,9 +14,18 @@ Projeto em Next.js preparado para deploy na Vercel, com integracao ao GoodWe SEM
 - historico diario recente
 - cache no backend para reduzir carga na API externa
 
+## Funcionalidades do painel
+
+- **Alertas e saúde da usina**: inversores parados em horário de sol, dias sem registro, dias com geração muito abaixo do normal, queda de rendimento nas últimas 2 semanas e aviso de chuva para amanhã.
+- **Meta do mês**: progresso, projeção, kWh/dia necessários para bater a meta e comparação do acumulado do ano com o ano anterior.
+- **Análise de geração**: qualquer mês (dia a dia, com melhor/pior dia, média, dias abaixo da meta, comparação com mês anterior e ano anterior), últimos 6 ou 12 meses (com o mesmo mês do ano anterior ao lado), detalhe de um dia específico e exportação em CSV.
+- **Inversores**: status, potência, geração do dia/mês/total e participação de cada um na geração de hoje.
+
 ## Arquitetura
 
 - `src/app/api/solar/route.ts`: endpoint server-side para concentrar acesso ao SEMS
+- `src/app/api/solar/history/route.ts`: historico por dia ou por mes (`?dimension=day|month&start=AAAA-MM-DD&end=AAAA-MM-DD`)
+- `src/components/period-analysis.tsx` e `src/components/plant-health.tsx`: analise por periodo, alertas e meta
 - `src/lib/sems/client.ts`: cliente HTTP da integracao nao oficial
 - `src/lib/solar-dashboard.ts`: transformacao do payload do SEMS para o contrato do frontend
 - `src/components/dashboard-shell.tsx`: dashboard client-side com polling a cada 60s (mostra o erro do SEMS+ na tela se a primeira leitura falhar)
@@ -33,7 +42,11 @@ SEMS_PLANT_ID=
 TARIFA_KWH=0.90
 META_DIARIA=1500
 SEMS_CACHE_TTL_MS=60000
+DASHBOARD_PASSWORD=sua_senha_do_painel
 ```
+
+- `DASHBOARD_PASSWORD` e a senha da tela de bloqueio. Se nao for definida, a senha padrao e `solee2026`.
+- O acesso fica salvo num cookie assinado; trocar a senha desconecta todos os aparelhos.
 
 ### Observacoes
 

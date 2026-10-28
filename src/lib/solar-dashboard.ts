@@ -1,7 +1,7 @@
 import { ZodError } from "zod";
 
 import { getEnv } from "@/lib/env";
-import { getSemsPlantSnapshot } from "@/lib/sems/client";
+import { getSemsPlantSnapshot, getSemsProductionHistory, getStationToday } from "@/lib/sems/client";
 
 export class SolarDashboardConfigError extends Error {}
 export class SolarDashboardUpstreamError extends Error {}
@@ -27,6 +27,8 @@ export type SolarDashboardData = {
     statusLabel: string;
     updatedAt: string;
     tariffKwhBrl: number;
+    capacityKwp: number | null;
+    stationToday: string;
   };
   inverters: Array<{
     id: string;
@@ -41,13 +43,25 @@ export type SolarDashboardData = {
     timeLabel: string;
     powerKw: number;
   }>;
-  dailyHistory: Array<{
-    date: string;
-    label: string;
-    generationKwh: number;
-    economyBrl: number;
-  }>;
+  dailyHistory: HistoryPoint[];
+  monthlyHistory: HistoryPoint[];
   errorLog?: string;
+};
+
+export type HistoryPoint = {
+  date: string;
+  label: string;
+  generationKwh: number;
+  economyBrl: number;
+};
+
+export type SolarHistoryData = {
+  dimension: "day" | "month";
+  start: string;
+  end: string;
+  tariffKwhBrl: number;
+  targetDailyKwh: number;
+  points: HistoryPoint[];
 };
 
 let cache: CachedValue | null = null;
@@ -70,6 +84,58 @@ function formatHourLabel(date: string) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(date));
+}
+
+function formatMonthLabel(date: string) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Maceio",
+    month: "short",
+    year: "2-digit",
+  }).format(new Date(date));
+}
+
+function toHistoryPoint(
+  item: { date: string; generationKwh: number },
+  dimension: "day" | "month",
+  tariff: number,
+): HistoryPoint {
+  return {
+    date: item.date,
+    label: dimension === "day" ? formatDayLabel(item.date) : formatMonthLabel(item.date),
+    generationKwh: toFixedNumber(item.generationKwh),
+    economyBrl: toFixedNumber(item.generationKwh * tariff, 2),
+  };
+}
+
+function wrapError(error: unknown): never {
+  if (error instanceof ZodError) {
+    throw new SolarDashboardConfigError(error.issues.map((issue) => issue.message).join(" "));
+  }
+  throw new SolarDashboardUpstreamError(
+    error instanceof Error ? error.message : "Falha desconhecida ao consultar SEMS.",
+  );
+}
+
+/** Historico de producao entre duas datas (YYYY-MM-DD), por dia ou por mes. */
+export async function getSolarHistoryData(
+  dimension: "day" | "month",
+  start: string,
+  end: string,
+): Promise<SolarHistoryData> {
+  try {
+    const env = getEnv();
+    const rows = await getSemsProductionHistory(dimension, start, end);
+    return {
+      dimension,
+      start,
+      end,
+      tariffKwhBrl: env.TARIFA_KWH,
+      targetDailyKwh: env.META_DIARIA,
+      points: rows.map((row) => toHistoryPoint(row, dimension, env.TARIFA_KWH)),
+    };
+  } catch (error) {
+    wrapError(error);
+  }
 }
 
 function getMonthKey(date: string) {
@@ -123,18 +189,16 @@ export async function getSolarDashboardData(): Promise<SolarDashboardData> {
         statusLabel: snapshot.status,
         updatedAt: new Date().toISOString(),
         tariffKwhBrl: env.TARIFA_KWH,
+        capacityKwp: snapshot.capacityKwp,
+        stationToday: getStationToday(),
       },
       inverters: snapshot.inverters,
       hourlyChart: snapshot.hourlyChart.map((item) => ({
         timeLabel: formatHourLabel(item.timestamp),
         powerKw: toFixedNumber(item.powerKw),
       })),
-      dailyHistory: snapshot.dailyHistory.map((item) => ({
-        date: item.date,
-        label: formatDayLabel(item.date),
-        generationKwh: toFixedNumber(item.generationKwh),
-        economyBrl: toFixedNumber(item.generationKwh * env.TARIFA_KWH, 2),
-      })),
+      dailyHistory: snapshot.dailyHistory.map((item) => toHistoryPoint(item, "day", env.TARIFA_KWH)),
+      monthlyHistory: snapshot.monthlyHistory.map((item) => toHistoryPoint(item, "month", env.TARIFA_KWH)),
       errorLog: snapshot.errorLog,
     };
 
@@ -145,12 +209,6 @@ export async function getSolarDashboardData(): Promise<SolarDashboardData> {
 
     return data;
   } catch (error) {
-    if (error instanceof ZodError) {
-      throw new SolarDashboardConfigError(error.issues.map((issue) => issue.message).join(" "));
-    }
-
-    throw new SolarDashboardUpstreamError(
-      error instanceof Error ? error.message : "Falha desconhecida ao consultar SEMS.",
-    );
+    wrapError(error);
   }
 }

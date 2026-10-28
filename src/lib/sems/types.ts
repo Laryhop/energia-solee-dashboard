@@ -28,6 +28,7 @@ export type SemsPlantSnapshot = {
   plantId: string;
   plantName: string;
   location: string | null;
+  capacityKwp: number | null;
   totalGenerationKwh: number;
   todayGenerationKwh: number;
   monthGenerationKwh: number;

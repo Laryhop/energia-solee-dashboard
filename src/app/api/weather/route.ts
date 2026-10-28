@@ -1,5 +1,6 @@
-import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
+
+import { isAuthenticated } from "@/lib/auth";
 
 type ForecastResponse = {
   current?: {
@@ -59,8 +60,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET() {
-  const cookieStore = await cookies();
-  if (cookieStore.get("solee_auth")?.value !== "1") {
+  if (!(await isAuthenticated())) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
