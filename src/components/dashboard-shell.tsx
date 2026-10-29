@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { OutageHistory } from "@/components/outage-history";
 import { PeriodAnalysis } from "@/components/period-analysis";
 import { PlantHealth } from "@/components/plant-health";
+import { RateioTab } from "@/components/rateio-tab";
 import { cf, cp, nf } from "@/lib/format";
 
 // --- Tipagens ---
@@ -47,6 +48,19 @@ export function DashboardShell() {
   const [isDark, setIsDark] = useState(false);
   const [hoverData, setHoverData] = useState<any>(null);
   const [staleSince, setStaleSince] = useState<string | null>(null);
+  const [tab, setTab] = useState<"geracao" | "rateio">("geracao");
+
+  // Aba escolhida fica no endereco (#rateio), para recarregar na mesma aba.
+  useEffect(() => {
+    const fromHash = () => setTab(window.location.hash === "#rateio" ? "rateio" : "geracao");
+    fromHash();
+    window.addEventListener("hashchange", fromHash);
+    return () => window.removeEventListener("hashchange", fromHash);
+  }, []);
+  const chooseTab = (next: "geracao" | "rateio") => {
+    setTab(next);
+    window.history.replaceState(null, "", next === "rateio" ? "#rateio" : window.location.pathname);
+  };
 
   useEffect(() => {
     const saved = localStorage.getItem("theme") === "dark";
@@ -173,6 +187,33 @@ export function DashboardShell() {
             {isDark ? "MODO CLARO ☀️" : "MODO ESCURO 🌙"}
           </button>
         </header>
+
+        {/* ABAS */}
+        <nav className="flex gap-2 rounded-full border border-slate-200 bg-white p-1.5 shadow-sm dark:border-emerald-900/30 dark:bg-[#0f1d15] sm:w-fit" aria-label="Seções do painel">
+          {([
+            ["geracao", "Geração e usina"],
+            ["rateio", "Rateio dos créditos"],
+          ] as const).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              aria-current={tab === id ? "page" : undefined}
+              onClick={() => chooseTab(id)}
+              className={`flex-1 rounded-full px-5 py-2.5 text-xs font-black uppercase tracking-wider transition-colors sm:flex-none ${
+                tab === id
+                  ? "bg-[#0d2a1d] text-white dark:bg-amber-500 dark:text-[#0d1a12]"
+                  : "text-slate-500 hover:bg-slate-100 dark:text-emerald-200/70 dark:hover:bg-white/5"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+
+        {tab === "rateio" ? (
+          <RateioTab />
+        ) : (
+        <>
 
         {/* CARDS DE MÉTRICAS */}
         <section className="grid gap-4 grid-cols-2 lg:grid-cols-4">
@@ -356,6 +397,8 @@ export function DashboardShell() {
           today={today}
           inverters={inverters.map((inv: any) => ({ id: inv.id, name: inv.name }))}
         />
+        </>
+        )}
       </div>
     </main>
   );

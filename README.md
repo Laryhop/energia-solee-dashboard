@@ -20,6 +20,7 @@ Projeto em Next.js preparado para deploy na Vercel, com integracao ao GoodWe SEM
 - **Meta do mês**: progresso, projeção, kWh/dia necessários para bater a meta e comparação do acumulado do ano com o ano anterior.
 - **Análise de geração**: qualquer mês (dia a dia, com melhor/pior dia, média, dias abaixo da meta, comparação com mês anterior e ano anterior), últimos 6 ou 12 meses (com o mesmo mês do ano anterior ao lado), detalhe de um dia específico e exportação em CSV.
 - **Histórico de paradas**: registra automaticamente quando cada inversor para e volta, quanto tempo ficou parado, a energia que deixou de gerar e o valor perdido; visão por dia (linha do tempo), mês e ano, totais por inversor, disponibilidade, observações, opção de ignorar falso alarme e exportação CSV.
+- **Rateio dos créditos** (aba própria): envio da planilha de rateio da Equatorial (.xlsx), lida no navegador; prévia com novas UCs, UCs que saíram e percentuais alterados; mês de vigência de cada lista; estimativa mensal por UC com base na geração do mês anterior; créditos enviados por mês e acumulado por UC; apelidos das UCs; CPF mascarado; exportação CSV. A lista fica só no banco do painel, nunca no repositório.
 - **Inversores**: status, potência, geração do dia/mês/total e participação de cada um na geração de hoje.
 
 ## Arquitetura
