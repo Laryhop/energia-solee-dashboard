@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { cf, downloadCsv, monthLabel, nf, nf0 } from "@/lib/format";
-import { parseRateioXlsx, type ParsedRateio } from "@/lib/rateio-parse";
+import { parseRateioXlsx, type ParsedRateio, type ParsedRateioList } from "@/lib/rateio-parse";
 
 // ---------- tipos (espelham src/lib/rateio.ts) ----------
 
@@ -75,7 +75,14 @@ export function RateioTab() {
   const [showDocs, setShowDocs] = useState(false);
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"planilha" | "pct" | "nome">("planilha");
-  const [upload, setUpload] = useState<{ parsed: ParsedRateio; fileName: string; effectiveMonth: string } | null>(null);
+  const [upload, setUpload] = useState<{
+    parsed: ParsedRateio;
+    fileName: string;
+    effectiveMonth: string;
+    /** Indice da lista (aba) escolhida em parsed.lists. */
+    listIndex: number;
+  } | null>(null);
+  const chosen: ParsedRateioList | null = upload ? upload.parsed.lists[upload.listIndex] ?? upload.parsed.lists[0] : null;
   const [reading, setReading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingName, setEditingName] = useState<string | null>(null);
@@ -181,7 +188,7 @@ export function RateioTab() {
     try {
       const parsed = await parseRateioXlsx(file);
       const effectiveMonth = parsed.requestDate ? parsed.requestDate.slice(0, 7) : currentMonth;
-      setUpload({ parsed, fileName: file.name, effectiveMonth });
+      setUpload({ parsed, fileName: file.name, effectiveMonth, listIndex: 0 });
     } catch (err) {
       setError(err instanceof Error ? `Não consegui ler a planilha: ${err.message}` : "Não consegui ler a planilha.");
     } finally {
@@ -193,17 +200,17 @@ export function RateioTab() {
   const nameOf = (uc: string) => upload?.parsed.names[key(uc)] || names[key(uc)] || "";
 
   const diff = useMemo(() => {
-    if (!upload) return null;
+    if (!upload || !chosen) return null;
     const base = versionFor(upload.effectiveMonth) ?? versions.at(-1) ?? null;
     const before = new Map((base?.entries ?? []).map((entry) => [key(entry.uc), entry]));
-    const after = new Map(upload.parsed.entries.map((entry) => [key(entry.uc), entry]));
-    const added = upload.parsed.entries.filter((entry) => !before.has(key(entry.uc)));
+    const after = new Map(chosen.entries.map((entry) => [key(entry.uc), entry]));
+    const added = chosen.entries.filter((entry) => !before.has(key(entry.uc)));
     const removed = (base?.entries ?? []).filter((entry) => !after.has(key(entry.uc)));
-    const changed = upload.parsed.entries
+    const changed = chosen.entries
       .filter((entry) => before.has(key(entry.uc)) && Math.abs((before.get(key(entry.uc))?.pct ?? 0) - (entry.pct ?? 0)) > 1e-7)
       .map((entry) => ({ entry, old: before.get(key(entry.uc))?.pct ?? 0 }));
     return { base, added, removed, changed };
-  }, [upload, versionFor, versions]);
+  }, [upload, chosen, versionFor, versions]);
 
   async function saveUpload() {
     if (!upload) return;
@@ -212,12 +219,39 @@ export function RateioTab() {
       const response = await fetch("/api/rateio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...upload.parsed, effectiveMonth: upload.effectiveMonth, fileName: upload.fileName }),
+        body: JSON.stringify({
+          ...chosen,
+          names: upload.parsed.names,
+          effectiveMonth: upload.effectiveMonth,
+          fileName: `${upload.fileName}${upload.parsed.lists.length > 1 ? ` (aba ${chosen?.sheet})` : ""}`,
+        }),
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body?.error || "Falha ao salvar.");
       setUpload(null);
       setMessage(`Rateio salvo: ${body.entries.length} UCs, valendo a partir de ${monthLabel(body.effectiveMonth, true).toLowerCase()}.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Falha ao salvar.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  /** Atualiza so os nomes dos clientes, sem mexer no rateio salvo. */
+  async function saveNamesOnly() {
+    if (!upload) return;
+    setSaving(true);
+    try {
+      const response = await fetch("/api/rateio", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ names: upload.parsed.names }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body?.error || "Falha ao salvar.");
+      setUpload(null);
+      setMessage(`Nomes atualizados: ${body.saved} cliente(s). O rateio continua o mesmo.`);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao salvar.");
@@ -320,18 +354,19 @@ export function RateioTab() {
         {message && <p className="mt-4 rounded-2xl bg-emerald-50 p-4 text-sm font-bold text-emerald-800 dark:bg-emerald-900/20 dark:text-emerald-300">{message}</p>}
 
         {/* previa da planilha enviada */}
-        {upload && diff && (
+        {upload && diff && chosen && (
           <div className="mt-6 rounded-[2rem] border-2 border-amber-400/60 bg-amber-50/50 p-5 dark:border-amber-500/30 dark:bg-amber-900/10">
             <p className="text-[10px] font-black uppercase tracking-widest text-amber-700 dark:text-amber-400">Conferir antes de salvar</p>
             <p className="mt-1 text-lg font-black text-[#052e16] dark:text-white">{upload.fileName}</p>
             <p className="text-xs font-bold text-slate-600 dark:text-emerald-200/70">
-              {upload.parsed.entries.length} UCs · soma {pctFmt.format(upload.parsed.totalPct)} · solicitação {formatDate(upload.parsed.requestDate)} ·{" "}
-              {upload.parsed.forma ?? "—"}
+              {chosen.entries.length} UCs · soma {pctFmt.format(chosen.totalPct)} · solicitação {formatDate(chosen.requestDate)} ·{" "}
+              {chosen.forma ?? "—"}
+              {chosen.ugUc && <> · UC geradora {chosen.ugUc}</>}
             </p>
 
             <p className={`mt-2 text-xs font-bold ${Object.keys(upload.parsed.names).length ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-300"}`}>
               {Object.keys(upload.parsed.names).length
-                ? `✓ Nome do cliente encontrado para ${Object.keys(upload.parsed.names).length} de ${upload.parsed.entries.length} UCs (aba ${upload.parsed.namesFrom.map((sheet) => `“${sheet}”`).join(", ")}).`
+                ? `✓ Nome do cliente encontrado para ${Object.keys(upload.parsed.names).length} de ${chosen.entries.length} UCs (aba ${upload.parsed.namesFrom.map((sheet) => `“${sheet}”`).join(", ")}).`
                 : "Nenhuma aba com nome do cliente e UC foi encontrada nesta planilha — os nomes já salvos no site serão mantidos."}
             </p>
 
@@ -348,7 +383,48 @@ export function RateioTab() {
               Os créditos desse mês em diante serão calculados com esta lista. Para registrar uma lista antiga, escolha o mês em que ela começou a valer.
             </p>
 
-            {upload.parsed.warnings.map((warning) => (
+            {upload.parsed.lists.length > 1 && (
+              <div className="mt-4">
+                <p className="text-sm font-black text-[#052e16] dark:text-white">Esta planilha tem {upload.parsed.lists.length} listas. Qual é a do rateio?</p>
+                <div className="mt-2 flex flex-col gap-2">
+                  {upload.parsed.lists.map((list, index) => (
+                    <label
+                      key={list.sheet}
+                      className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 text-xs font-bold ${
+                        index === upload.listIndex
+                          ? "border-[#0d2a1d] bg-white dark:border-amber-500 dark:bg-[#0d1a12]"
+                          : "border-slate-200 bg-white/60 dark:border-emerald-900/40 dark:bg-transparent"
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="lista"
+                        checked={index === upload.listIndex}
+                        onChange={() =>
+                          setUpload({
+                            ...upload,
+                            listIndex: index,
+                            effectiveMonth: list.requestDate ? list.requestDate.slice(0, 7) : upload.effectiveMonth,
+                          })
+                        }
+                        className="mt-0.5"
+                      />
+                      <span className="text-[#052e16] dark:text-white">
+                        Aba “{list.sheet}” · {list.entries.length} UCs · soma{" "}
+                        <span className={Math.abs(list.totalPct - 1) > 0.001 ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-400"}>
+                          {pctFmt.format(list.totalPct)}
+                        </span>
+                        {list.requestDate && <> · solicitação {formatDate(list.requestDate)}</>}
+                        {list.ugUc && <> · UC geradora {list.ugUc}</>}
+                        {index === 0 && <span className="ml-2 text-[10px] uppercase text-emerald-700 dark:text-emerald-400">sugerida</span>}
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {chosen.warnings.map((warning) => (
               <p key={warning} className="mt-3 text-xs font-bold text-amber-700 dark:text-amber-300">⚠️ {warning}</p>
             ))}
 
@@ -395,6 +471,11 @@ export function RateioTab() {
               <button type="button" className={btnPrimary} disabled={saving} onClick={saveUpload}>
                 {saving ? "Salvando..." : "Salvar rateio"}
               </button>
+              {Object.keys(upload.parsed.names).length > 0 && versions.length > 0 && (
+                <button type="button" className={btnGhost} disabled={saving} onClick={saveNamesOnly}>
+                  Atualizar só os nomes dos clientes
+                </button>
+              )}
               <button type="button" className={btnGhost} onClick={() => setUpload(null)}>
                 Cancelar
               </button>

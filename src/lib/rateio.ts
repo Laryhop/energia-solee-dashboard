@@ -157,6 +157,17 @@ export async function updateRateioVersionMonth(id: string, effectiveMonth: strin
   return version;
 }
 
+/** Salva os nomes de varios clientes de uma vez (vindos de uma planilha). */
+export async function setUcNames(names: Record<string, unknown>) {
+  const commands: Array<Array<string | number>> = [];
+  for (const [uc, name] of Object.entries(names).slice(0, 5_000)) {
+    const clean = sanitizeText(name, 80);
+    if (clean && ucKey(uc)) commands.push(["HSET", KEY_NAMES, ucKey(uc), clean]);
+  }
+  if (commands.length) await redis(commands);
+  return { saved: commands.length };
+}
+
 /** Salva (ou apaga, se vazio) o apelido de uma UC. */
 export async function setUcName(uc: string, name: string) {
   const key = ucKey(uc);

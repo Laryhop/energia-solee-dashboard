@@ -16,7 +16,23 @@ export type ParsedRateioEntry = {
   order: number;
 };
 
+/** Uma lista de rateio encontrada numa aba da planilha. */
+export type ParsedRateioList = {
+  sheet: string;
+  ugUc: string | null;
+  requestDate: string | null;
+  enquadramento: string | null;
+  forma: string | null;
+  entries: ParsedRateioEntry[];
+  totalPct: number;
+  warnings: string[];
+};
+
 export type ParsedRateio = {
+  /** Todas as listas encontradas (a primeira e a sugerida). */
+  lists: ParsedRateioList[];
+  /** Aba da lista sugerida. */
+  sheet: string;
   /** Nome do cliente por UC (chave = so os digitos da UC), lido de qualquer aba da planilha. */
   names: Record<string, string>;
   /** Abas de onde os nomes foram lidos. */
@@ -66,7 +82,7 @@ function parseCells(rowXml: string, rowNumber: number, sheet: string): RawCell[]
     if (type === "inlineStr") {
       value = [...inner.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map((part) => decodeXml(part[1])).join("");
     } else {
-      const v = /<v>([\s\S]*?)<\/v>/.exec(inner);
+      const v = /<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/.exec(inner);
       value = v ? decodeXml(v[1]) : "";
     }
     if (value !== "") cells.push({ sheet, col, row: rowNumber, type, value });
@@ -216,80 +232,139 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
   }
   for (const rows of sheets.values()) for (const list of rows.values()) list.sort((a, b) => colIndex(a.col) - colIndex(b.col));
 
-  // Aba do rateio: a que tem o cabecalho "Unidade Consumidora" + CPF/CNPJ (modelo da Equatorial).
-  const isListHeader = (list: Resolved[]) =>
-    list.some((cell) => normalize(cell.text) === "unidade consumidora") && list.some((cell) => /cpf|cnpj/.test(normalize(cell.text)));
-  const mainSheet = [...sheets.entries()].find(([, rows]) => [...rows.values()].some(isListHeader))?.[0] ?? [...sheets.keys()][0];
-  const byRow = sheets.get(mainSheet) ?? new Map<number, Resolved[]>();
-
-  /** Valor da primeira celula preenchida a direita do rotulo. */
-  const valueAfter = (label: RegExp) => {
-    for (const list of byRow.values()) {
-      const index = list.findIndex((cell) => label.test(normalize(cell.text)));
-      if (index >= 0) {
-        const next = list.slice(index + 1).find((cell) => cell.text.trim() && colIndex(cell.col) <= 12);
-        if (next) return next;
-      }
-    }
-    return null;
-  };
-
-  const warnings: string[] = [];
-  const ugUc = valueAfter(/^unidade consumidora da unidade geradora/)?.text.trim() ?? null;
-  const dateCell = valueAfter(/^data (da )?solicitacao/);
-  const requestDate = dateCell ? excelDate(dateCell.text) : null;
-  const enquadramento = valueAfter(/^enquadramento/)?.text.trim() ?? null;
-  const forma = valueAfter(/^forma de alocacao/)?.text.trim() ?? null;
-
-  // Cabecalho da lista
-  let header: { row: number; uc: string; doc: string | null; pct: string | null; order: string | null } | null = null;
-  for (const [row, list] of [...byRow.entries()].sort((a, b) => a[0] - b[0])) {
-    const ucCell = list.find((cell) => normalize(cell.text) === "unidade consumidora");
-    if (!ucCell) continue;
-    const doc = list.find((cell) => /cpf|cnpj/.test(normalize(cell.text)));
-    const pct = list.find((cell) => /%|excedente|percentual/.test(normalize(cell.text)) && cell !== ucCell);
-    const order = list.find((cell) => normalize(cell.text) === "ordem");
-    header = { row, uc: ucCell.col, doc: doc?.col ?? null, pct: pct?.col ?? null, order: order?.col ?? null };
-    break;
-  }
-  if (!header) throw new Error("Não encontrei a coluna “Unidade Consumidora” na planilha.");
-  const pctCol = header.pct ?? (header.doc ? String.fromCharCode(header.doc.charCodeAt(0) + 1) : null);
-
-  const entries: ParsedRateioEntry[] = [];
-  const seen = new Set<string>();
-  for (const [row, list] of [...byRow.entries()].sort((a, b) => a[0] - b[0])) {
-    if (row <= header.row) continue;
-    const get = (col: string | null) => (col ? list.find((cell) => cell.col === col)?.text.trim() ?? "" : "");
-    const uc = get(header.uc).replace(/\s+/g, "");
-    if (!uc) continue;
-    const key = uc.replace(/\D/g, "");
-    if (seen.has(key)) {
-      warnings.push(`A UC ${uc} aparece mais de uma vez (linha ${row}); mantive a primeira.`);
-      continue;
-    }
-    seen.add(key);
-    const rawPct = get(pctCol).replace(",", ".").replace("%", "");
-    let pct: number | null = rawPct === "" ? null : Number(rawPct);
-    if (pct !== null && !Number.isFinite(pct)) pct = null;
-    if (pct !== null && pct > 1) pct /= 100; // escrito como 5,4 em vez de 0,054
-    entries.push({ uc, doc: get(header.doc), pct, order: Number(get(header.order)) || entries.length + 1 });
-  }
-
-  if (!entries.length) throw new Error("A planilha não tem nenhuma UC na lista de rateio.");
-
-  // Nomes dos clientes: qualquer aba com uma coluna de nome/cliente e uma de UC.
-  const ucKeys = [...new Set(entries.map((entry) => entry.uc.replace(/\D/g, "")))];
-  const names: Record<string, string> = {};
-  const namesFrom = new Set<string>();
   const NAME_HEADER = /^(nome|cliente|nome do cliente|nome cliente|titular|nome do titular|razao social|beneficiario|consumidor)\b/;
   const UC_HEADER = /^(uc|u\.c\.?|unidade consumidora|unid\.? consumidora|conta contrato|instalacao|codigo da uc|numero da uc|n. ?(da )?uc)\b/;
+  const PCT_HEADER = /%|percentual|excedente|rateio/;
+  const isUcHeader = (text: string) => UC_HEADER.test(normalize(text)) && !/geradora/.test(normalize(text));
+  const sortedRows = (rows: Map<number, Resolved[]>) => [...rows.entries()].sort((a, b) => a[0] - b[0]);
+
+  // ---------- uma lista candidata por aba (aba com coluna de UC e de %) ----------
+  type Candidate = {
+    sheet: string;
+    label: string;
+    entries: ParsedRateioEntry[];
+    totalPct: number;
+    duplicates: string[];
+    meta: { ugUc: string | null; requestDate: string | null; enquadramento: string | null; forma: string | null };
+  };
+
+  const candidates: Candidate[] = [];
+  for (const [sheet, rows] of sheets) {
+    let header: { row: number; uc: string; doc: string | null; pct: string; order: string | null } | null = null;
+    for (const [row, list] of sortedRows(rows)) {
+      const textCells = list.filter((cell) => cell.type !== "n");
+      const ucCell = textCells.find((cell) => isUcHeader(cell.text));
+      const pctCell = textCells.find((cell) => cell !== ucCell && PCT_HEADER.test(normalize(cell.text)) && normalize(cell.text).length < 40);
+      if (!ucCell || !pctCell) continue;
+      const doc = textCells.find((cell) => /cpf|cnpj/.test(normalize(cell.text)));
+      const order = textCells.find((cell) => /^(ordem|item|n[ºo°.]?)$/.test(normalize(cell.text)));
+      header = { row, uc: ucCell.col, doc: doc?.col ?? null, pct: pctCell.col, order: order?.col ?? null };
+      break;
+    }
+    if (!header) continue;
+
+    const raw: Array<{ uc: string; doc: string; pct: number | null; order: number }> = [];
+    const seen = new Set<string>();
+    const duplicates: string[] = [];
+    for (const [row, list] of sortedRows(rows)) {
+      if (row <= header.row) continue;
+      const get = (col: string | null) => (col ? list.find((cell) => cell.col === col)?.text.trim() ?? "" : "");
+      const uc = get(header.uc).replace(/\s+/g, "");
+      const digits = uc.replace(/\D/g, "");
+      if (digits.length < 5 || /#ref|#n\/a|#valor/i.test(uc)) continue; // linhas vazias, "0", totais e erros
+      if (seen.has(digits)) {
+        duplicates.push(uc);
+        continue;
+      }
+      seen.add(digits);
+      const rawPct = get(header.pct).replace(",", ".").replace("%", "").trim();
+      const pct = rawPct === "" || !Number.isFinite(Number(rawPct)) ? null : Number(rawPct);
+      raw.push({ uc, doc: get(header.doc), pct, order: Number(get(header.order)) || raw.length + 1 });
+    }
+    if (!raw.length) continue;
+
+    // Unidade do %: fracao (0,0054) ou pontos percentuais (0,54). Decide pela coluna inteira.
+    const sum = raw.reduce((total, item) => total + (item.pct ?? 0), 0);
+    const factor = sum > 1.5 ? 0.01 : 1;
+    const entries = raw.map((item) => ({ ...item, pct: item.pct === null ? null : Number((item.pct * factor).toFixed(8)) }));
+
+    /** Valor da primeira celula preenchida a direita do rotulo, nesta aba. */
+    const valueAfter = (label: RegExp) => {
+      for (const list of rows.values()) {
+        const index = list.findIndex((cell) => label.test(normalize(cell.text)));
+        if (index >= 0) {
+          const next = list.slice(index + 1).find((cell) => cell.text.trim() && colIndex(cell.col) <= 20);
+          if (next) return next;
+        }
+      }
+      return null;
+    };
+    const dateCell = valueAfter(/^data (da )?solicitacao/);
+    candidates.push({
+      sheet,
+      label: sheetLabel(sheet),
+      entries,
+      totalPct: entries.reduce((total, item) => total + (item.pct ?? 0), 0),
+      duplicates,
+      meta: {
+        ugUc: valueAfter(/^(unidade consumidora|conta contrato) da (uc |unidade )?(unidade )?geradora/)?.text.trim() ?? null,
+        requestDate: dateCell ? excelDate(dateCell.text) : null,
+        enquadramento: valueAfter(/^enquadramento/)?.text.trim() ?? null,
+        forma: valueAfter(/^forma de alocacao/)?.text.trim() ?? null,
+      },
+    });
+  }
+  if (!candidates.length) {
+    throw new Error("Não encontrei nenhuma aba com as colunas de UC (ou Conta Contrato) e percentual.");
+  }
+
+  // Sugestao: a lista cuja soma fica mais perto de 100% (empate: mais UCs, depois a que tem CPF/CNPJ).
+  const score = (candidate: Candidate) =>
+    Math.abs(candidate.totalPct - 1) * 1000 - candidate.entries.length * 0.01 - (candidate.entries.some((entry) => entry.doc) ? 0.001 : 0);
+  candidates.sort((a, b) => score(a) - score(b));
+
+  // CPF/CNPJ que faltar numa lista vem de outra aba da mesma planilha.
+  const docs = new Map<string, string>();
+  for (const candidate of candidates) {
+    for (const entry of candidate.entries) {
+      const digits = entry.uc.replace(/\D/g, "");
+      if (entry.doc && !docs.has(digits)) docs.set(digits, entry.doc);
+    }
+  }
+  for (const candidate of candidates) {
+    candidate.entries = candidate.entries.map((entry) => ({ ...entry, doc: entry.doc || docs.get(entry.uc.replace(/\D/g, "")) || "" }));
+  }
+  // Dados da solicitacao: da propria lista ou de outra aba com as mesmas UCs.
+  for (const candidate of candidates) {
+    const keys = new Set(candidate.entries.map((entry) => entry.uc.replace(/\D/g, "")));
+    const donor = candidates
+      .filter((other) => other.meta.requestDate || other.meta.ugUc)
+      .sort(
+        (a, b) =>
+          b.entries.filter((entry) => keys.has(entry.uc.replace(/\D/g, ""))).length -
+          a.entries.filter((entry) => keys.has(entry.uc.replace(/\D/g, ""))).length,
+      )[0];
+    if (donor && donor !== candidate) {
+      candidate.meta = {
+        ugUc: candidate.meta.ugUc ?? donor.meta.ugUc,
+        requestDate: candidate.meta.requestDate ?? donor.meta.requestDate,
+        enquadramento: candidate.meta.enquadramento ?? donor.meta.enquadramento,
+        forma: candidate.meta.forma ?? donor.meta.forma,
+      };
+    }
+  }
+
+  // ---------- nomes dos clientes: qualquer aba com coluna de nome/cliente e de UC ----------
+  const ucKeys = [...new Set(candidates.flatMap((candidate) => candidate.entries.map((entry) => entry.uc.replace(/\D/g, ""))))];
+  const names: Record<string, string> = {};
+  const namesFrom = new Set<string>();
   for (const [sheet, rows] of sheets) {
     let nameCol: string | null = null;
     let ucCol: string | null = null;
-    for (const [, list] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
-      const textCells = list.filter((cell) => cell.type === "s" || cell.type === "str" || cell.type === "inlineStr");
+    for (const [, list] of sortedRows(rows)) {
+      const textCells = list.filter((cell) => cell.type !== "n");
       const nameHeader = textCells.find((cell) => NAME_HEADER.test(normalize(cell.text)));
-      const ucHeader = textCells.find((cell) => UC_HEADER.test(normalize(cell.text)) && !/geradora/.test(normalize(cell.text)));
+      const ucHeader = textCells.find((cell) => isUcHeader(cell.text));
       if (nameHeader && ucHeader) {
         nameCol = nameHeader.col;
         ucCol = ucHeader.col;
@@ -307,17 +382,51 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
       }
     }
   }
-  const totalPct = entries.reduce((sum, entry) => sum + (entry.pct ?? 0), 0);
-  const isPercent = !forma || /percentual/i.test(forma);
-  if (isPercent && entries.some((entry) => entry.pct === null)) {
-    warnings.push("Há UCs sem percentual preenchido.");
-  }
-  if (isPercent && Math.abs(totalPct - 1) > 0.001) {
-    warnings.push(`A soma dos percentuais é ${(totalPct * 100).toFixed(3)}% (o esperado é 100%).`);
-  }
 
-  const found = Object.keys(names).length;
-  if (found && found < entries.length) warnings.push(`Encontrei o nome do cliente de ${found} das ${entries.length} UCs.`);
-
-  return { names, namesFrom: [...namesFrom], ugUc, requestDate, enquadramento, forma, entries, totalPct, warnings };
+  const lists: ParsedRateioList[] = candidates.map((candidate) => ({
+    sheet: candidate.label,
+    entries: candidate.entries,
+    totalPct: candidate.totalPct,
+    ...candidate.meta,
+    warnings: listWarnings(candidate, candidates, names),
+  }));
+  const chosen = lists[0];
+  return { names, namesFrom: [...namesFrom], lists, ...chosen };
 }
+
+/** Avisos de uma lista: soma, % vazio, UCs repetidas e diferencas com outras abas da planilha. */
+function listWarnings(
+  candidate: { label: string; entries: ParsedRateioEntry[]; totalPct: number; duplicates: string[]; meta: { forma: string | null; ugUc: string | null } },
+  all: Array<{ label: string; entries: ParsedRateioEntry[]; meta: { ugUc: string | null } }>,
+  names: Record<string, string>,
+) {
+  const warnings: string[] = [];
+  const pct = (value: number) => `${(value * 100).toLocaleString("pt-BR", { maximumFractionDigits: 3 })}%`;
+  const isPercent = !candidate.meta.forma || /percentual/i.test(candidate.meta.forma);
+  if (isPercent && candidate.entries.some((entry) => entry.pct === null)) warnings.push("Há UCs sem percentual preenchido.");
+  if (isPercent && Math.abs(candidate.totalPct - 1) > 0.001) {
+    warnings.push(`A soma dos percentuais desta lista é ${pct(candidate.totalPct)} (o esperado é 100%).`);
+  }
+  for (const uc of candidate.duplicates) warnings.push(`A UC ${uc} aparece mais de uma vez; mantive a primeira.`);
+
+  const mine = new Map(candidate.entries.map((entry) => [entry.uc.replace(/\D/g, ""), entry]));
+  for (const other of all) {
+    if (other.label === candidate.label) continue;
+    // Lista de outra usina (UC geradora diferente): nao compara.
+    const ugA = candidate.meta.ugUc?.replace(/\D/g, "");
+    const ugB = other.meta.ugUc?.replace(/\D/g, "");
+    if (ugA && ugB && ugA !== ugB) continue;
+    const shared = other.entries.filter((entry) => mine.has(entry.uc.replace(/\D/g, "")));
+    if (shared.length < Math.min(5, candidate.entries.length / 2)) continue; // outra lista, sem relacao
+    for (const entry of shared) {
+      const key = entry.uc.replace(/\D/g, "");
+      const a = mine.get(key)?.pct ?? 0;
+      const b = entry.pct ?? 0;
+      if (Math.abs(a - b) > 0.00001) {
+        warnings.push(`${names[key] ? `${names[key]} (${entry.uc})` : entry.uc}: ${pct(a)} nesta lista, mas ${pct(b)} na aba “${other.label}”.`);
+      }
+    }
+  }
+  return warnings;
+}
+

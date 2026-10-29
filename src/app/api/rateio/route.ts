@@ -6,6 +6,7 @@ import {
   getRateioData,
   saveRateioVersion,
   setUcName,
+  setUcNames,
   updateRateioVersionMonth,
 } from "@/lib/rateio";
 import { isStorageConfigured } from "@/lib/storage";
@@ -42,12 +43,15 @@ export async function POST(request: Request) {
   }
 }
 
-/** PATCH { uc, name } -> apelido da UC; { id, effectiveMonth } -> muda a vigencia. */
+/** PATCH { uc, name } -> nome da UC; { names } -> varios nomes; { id, effectiveMonth } -> muda a vigencia. */
 export async function PATCH(request: Request) {
   if (!(await isAuthenticated())) return unauthorized();
   try {
     requireStorage();
     const body = (await request.json()) as Record<string, unknown>;
+    if (body.names && typeof body.names === "object") {
+      return NextResponse.json(await setUcNames(body.names as Record<string, unknown>));
+    }
     if (typeof body.uc === "string" && typeof body.name === "string") {
       return NextResponse.json(await setUcName(body.uc, body.name));
     }
