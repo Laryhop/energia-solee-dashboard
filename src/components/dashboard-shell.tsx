@@ -211,12 +211,6 @@ export function DashboardShell() {
           tomorrow={weatherDays[1] ?? null}
         />
 
-        {/* HISTÓRICO DE PARADAS */}
-        <OutageHistory
-          today={today}
-          inverters={inverters.map((inv: any) => ({ id: inv.id, name: inv.name }))}
-        />
-
         {/* ANÁLISE POR PERÍODO */}
         <PeriodAnalysis
           today={today}
@@ -356,6 +350,12 @@ export function DashboardShell() {
             })}
           </div>
         </section>
+
+        {/* HISTÓRICO DE PARADAS */}
+        <OutageHistory
+          today={today}
+          inverters={inverters.map((inv: any) => ({ id: inv.id, name: inv.name }))}
+        />
       </div>
     </main>
   );

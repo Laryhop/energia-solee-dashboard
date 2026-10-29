@@ -42,7 +42,7 @@ const KEEP_SECONDS = 5 * 365 * 86_400;
 // Alagoas usa UTC-3 o ano todo (sem horario de verao).
 const UTC_OFFSET_MS = -3 * 3_600_000;
 
-export type OutageReason = "Offline" | "Falha" | "Sem potência" | "Usina parada";
+export type OutageReason = "Offline" | "Falha" | "Sem potência" | "Usina parada" | "Geração abaixo do esperado";
 
 export type Outage = {
   id: string;
@@ -67,9 +67,14 @@ export type Outage = {
   lostBrl: number;
   tariff: number;
   /** "comunicacao" = portal sem dados, mas o inversor seguiu gerando. */
-  kind: "parada" | "comunicacao" | null;
+  /** "historico" = reconstruida a partir da geracao diaria (antes do monitoramento). */
+  kind: "parada" | "comunicacao" | "historico" | null;
   note?: string;
   ignored?: boolean;
+  /** Quantos inversores a parada envolve (registros historicos valem para a usina inteira). */
+  inverterCount?: number;
+  /** Dia sem nenhum registro de geracao no SEMS+ (so registros historicos). */
+  missingRecord?: boolean;
 };
 
 export type MonitorInverterState = {
