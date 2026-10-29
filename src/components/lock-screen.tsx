@@ -3,13 +3,13 @@ import { useState } from "react";
 
 export function LockScreen() {
   const [password, setPassword] = useState("");
-  const [error, setError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-    setError(false);
+    setError(null);
     
     try {
       const res = await fetch("/api/auth", {
@@ -21,10 +21,11 @@ export function LockScreen() {
       if (res.ok) {
         window.location.reload();
       } else {
-        setError(true);
+        const body = await res.json().catch(() => null);
+        setError(body?.error || "Senha incorreta. Tente novamente.");
       }
     } catch {
-      setError(true);
+      setError("Não foi possível conectar. Tente de novo.");
     } finally {
       setLoading(false);
     }
@@ -54,7 +55,7 @@ export function LockScreen() {
               disabled={loading}
             />
           </div>
-          {error && <p className="text-xs font-bold text-rose-500">Senha incorreta. Tente novamente.</p>}
+          {error && <p className="text-xs font-bold text-rose-500">{error}</p>}
           <button 
             type="submit" 
             disabled={loading || !password}

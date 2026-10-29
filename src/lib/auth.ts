@@ -4,9 +4,13 @@ import { cookies } from "next/headers";
 
 export const AUTH_COOKIE = "solee_auth";
 
-/** Senha do painel. Defina DASHBOARD_PASSWORD na Vercel para trocar a senha padrao. */
-export function getDashboardPassword() {
-  return process.env.DASHBOARD_PASSWORD || "solee2026";
+/**
+ * Senha do painel: so existe na variavel DASHBOARD_PASSWORD da Vercel (nunca no
+ * codigo, que e publico). Sem ela configurada, ninguem consegue entrar.
+ */
+export function getDashboardPassword(): string | null {
+  const password = process.env.DASHBOARD_PASSWORD?.trim();
+  return password ? password : null;
 }
 
 /**
@@ -16,12 +20,14 @@ export function getDashboardPassword() {
  */
 export function getAuthToken() {
   const secret = process.env.AUTH_SECRET || getDashboardPassword();
+  if (!secret) return null;
   return createHmac("sha256", secret).update("solee-auth-v1").digest("hex");
 }
 
 export function isValidAuthToken(value: string | undefined) {
-  if (!value) return false;
-  const expected = Buffer.from(getAuthToken());
+  const token = getAuthToken();
+  if (!value || !token || !getDashboardPassword()) return false;
+  const expected = Buffer.from(token);
   const received = Buffer.from(value);
   return expected.length === received.length && timingSafeEqual(expected, received);
 }

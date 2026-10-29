@@ -9,10 +9,20 @@ export async function POST(request: Request) {
     const password = body.password;
     
     const correctPassword = getDashboardPassword();
-    
-    if (password === correctPassword) {
+    const token = getAuthToken();
+    if (!correctPassword || !token) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Senha do painel não configurada. Crie a variável DASHBOARD_PASSWORD na Vercel e faça Redeploy.",
+        },
+        { status: 503 },
+      );
+    }
+
+    if (typeof password === "string" && password === correctPassword) {
       const cookieStore = await cookies();
-      cookieStore.set(AUTH_COOKIE, getAuthToken(), { 
+      cookieStore.set(AUTH_COOKIE, token, { 
         httpOnly: true, 
         secure: process.env.NODE_ENV === "production",
         sameSite: "lax",

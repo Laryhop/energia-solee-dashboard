@@ -47,7 +47,7 @@ SEMS_CACHE_TTL_MS=60000
 DASHBOARD_PASSWORD=sua_senha_do_painel
 ```
 
-- `DASHBOARD_PASSWORD` e a senha da tela de bloqueio. Se nao for definida, a senha padrao e `solee2026`.
+- `DASHBOARD_PASSWORD` e a senha da tela de bloqueio. E obrigatoria: sem ela ninguem entra no painel. Nunca coloque a senha no codigo (o repositorio e publico).
 - O acesso fica salvo num cookie assinado; trocar a senha desconecta todos os aparelhos.
 
 ### Observacoes
