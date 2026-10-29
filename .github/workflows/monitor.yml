@@ -22,19 +22,28 @@ jobs:
     steps:
       - name: Verificar paradas
         env:
-          # Endereco do painel: variavel DASHBOARD_URL do repositorio ou o "Website" do repositorio.
+          # Endereco do painel. Se a variavel DASHBOARD_URL do repositorio estiver definida, ela e usada;
+          # senao testa <nome-do-repositorio>.vercel.app, o "Website" do repositorio e o ultimo deploy de producao.
           DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          url="${DASHBOARD_URL:-$(gh api "repos/${GITHUB_REPOSITORY}" --jq .homepage)}"
-          if [ -z "$url" ]; then
-            echo "::error::Defina a variavel DASHBOARD_URL do repositorio com o endereco do painel."
-            exit 1
-          fi
-          response=$(curl -sS --max-time 60 --retry 2 --retry-delay 10 -w '\n%{http_code}' "${url%/}/api/monitor")
-          code=$(echo "$response" | tail -n1)
-          echo "$response" | head -n -1
-          if [ "$code" -ge 400 ]; then
-            echo "::error::Verificacao falhou (HTTP $code)"
-            exit 1
-          fi
+          repo_name="${GITHUB_REPOSITORY#*/}"
+          homepage=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.homepage // ""' || true)
+          last_deploy=$(gh api "repos/${GITHUB_REPOSITORY}/deployments?environment=Production&per_page=1" --jq '.[0].statuses_url // ""' | xargs -r gh api --jq '.[0].environment_url // ""' || true)
+          for url in "$DASHBOARD_URL" "https://${repo_name}.vercel.app" "$homepage" "$last_deploy"; do
+            [ -z "$url" ] && continue
+            url="${url%/}"
+            response=$(curl -sS --max-time 60 --retry 2 --retry-delay 10 -w '\n%{http_code}' "$url/api/monitor" || true)
+            code=$(echo "$response" | tail -n1)
+            body=$(echo "$response" | head -n -1)
+            echo "$url -> HTTP $code $body"
+            if echo "$body" | grep -q '"ok"'; then
+              if [ "$code" -ge 400 ]; then
+                echo "::error::Verificacao falhou em $url (HTTP $code): $body"
+                exit 1
+              fi
+              exit 0
+            fi
+          done
+          echo "::error::Nenhum endereco do painel respondeu. Defina a variavel DASHBOARD_URL do repositorio (Settings > Secrets and variables > Actions > Variables)."
+          exit 1
