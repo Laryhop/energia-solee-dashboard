@@ -23,8 +23,12 @@ function addMonths(month: string, count: number) {
  */
 async function backfill() {
   // Depois de completo, so confere de novo a cada 6 horas (os dias novos entram sozinhos ao serem lidos).
-  const [done] = await redis([["GET", KEY_BACKFILL_DONE]]);
+  const [done, lock] = await redis([
+    ["GET", KEY_BACKFILL_DONE],
+    ["SET", "solee:backfill:lock", "1", "NX", "EX", 60],
+  ]);
   if (done) return { complete: true, checkedAt: done };
+  if (lock !== "OK") return { complete: false, running: true };
 
   const started = Date.now();
   const today = getStationToday();
@@ -75,10 +79,8 @@ async function handle() {
 
   try {
     const result = await runMonitor();
-    let history: unknown;
-    if (!("skipped" in result && result.skipped === "recent")) {
-      history = await backfill().catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
-    }
+    // O preenchimento do banco tem trava propria: roda mesmo se a verificacao foi pulada.
+    const history = await backfill().catch((error) => ({ error: error instanceof Error ? error.message : String(error) }));
     return NextResponse.json({ ...result, history });
   } catch (error) {
     return NextResponse.json(
