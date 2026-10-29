@@ -557,7 +557,13 @@ export type ProductionSyncResult = {
  * Le a geracao diaria entre duas datas usando o banco; busca na API so o que
  * nao esta salvo (e os ultimos dias). Grava no banco os dias fechados buscados.
  */
-async function getDailyWithStore(start: string, end: string): Promise<{ rows: Map<string, number>; sync: ProductionSyncResult }> {
+class StoreIncompleteError extends Error {}
+
+async function getDailyWithStore(
+  start: string,
+  end: string,
+  maxFetchDays = Number.POSITIVE_INFINITY,
+): Promise<{ rows: Map<string, number>; sync: ProductionSyncResult }> {
   const today = localDate(new Date());
   const cappedEnd = end > today ? today : end;
   const lastFinal = addDays(today, -FINAL_AFTER_DAYS);
@@ -574,6 +580,8 @@ async function getDailyWithStore(start: string, end: string): Promise<{ rows: Ma
 
   const finalEnd = cappedEnd < lastFinal ? cappedEnd : lastFinal;
   const missing = start <= finalEnd ? daysBetween(start, finalEnd).filter((day) => !storedDays.has(day)) : [];
+  // Lacunas grandes ficam para o preenchimento agendado (evita rajadas que o SEMS+ bloqueia).
+  if (missing.length > maxFetchDays) throw new StoreIncompleteError(`${missing.length} dias ainda nao estao no banco.`);
 
   // 2. busca na API so os dias fechados que faltam e grava
   for (const [rangeStart, rangeEnd] of toRanges(missing)) {
@@ -625,9 +633,9 @@ export async function getSemsProductionHistory(
   const dailyStart = dimension === "month" ? `${start.slice(0, 7)}-01` : start;
   let rows: Map<string, number>;
   try {
-    ({ rows } = await getDailyWithStore(dailyStart, end));
+    ({ rows } = await getDailyWithStore(dailyStart, end, 45));
   } catch (error) {
-    console.error("Banco indisponivel, usando a API do SEMS+:", error);
+    if (!(error instanceof StoreIncompleteError)) console.error("Banco indisponivel, usando a API do SEMS+:", error);
     return fetchProductionFromApi(dimension, start, end);
   }
 
