@@ -17,6 +17,10 @@ export type ParsedRateioEntry = {
 };
 
 export type ParsedRateio = {
+  /** Nome do cliente por UC (chave = so os digitos da UC), lido de qualquer aba da planilha. */
+  names: Record<string, string>;
+  /** Abas de onde os nomes foram lidos. */
+  namesFrom: string[];
   ugUc: string | null;
   requestDate: string | null;
   enquadramento: string | null;
@@ -26,10 +30,12 @@ export type ParsedRateio = {
   warnings: string[];
 };
 
-type RawCell = { col: string; row: number; type: string; value: string };
+type RawCell = { sheet: string; col: string; row: number; type: string; value: string };
 
 const MAX_ROWS = 20_000;
-const EMPTY_ROWS_TO_STOP = 60;
+/** Para de ler uma aba depois de tantas linhas seguidas sem nenhum valor. */
+const EMPTY_ROWS_TO_STOP = 200;
+const MAX_SHEETS = 15;
 
 function decodeXml(text: string) {
   return text
@@ -51,7 +57,7 @@ function parseSharedStrings(xml: string) {
   return strings;
 }
 
-function parseCells(rowXml: string, rowNumber: number): RawCell[] {
+function parseCells(rowXml: string, rowNumber: number, sheet: string): RawCell[] {
   const cells: RawCell[] = [];
   for (const match of rowXml.matchAll(/<c r="([A-Z]+)\d+"([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
     const [, col, attrs, inner = ""] = match;
@@ -63,7 +69,7 @@ function parseCells(rowXml: string, rowNumber: number): RawCell[] {
       const v = /<v>([\s\S]*?)<\/v>/.exec(inner);
       value = v ? decodeXml(v[1]) : "";
     }
-    if (value !== "") cells.push({ col, row: rowNumber, type, value });
+    if (value !== "") cells.push({ sheet, col, row: rowNumber, type, value });
   }
   return cells;
 }
@@ -92,72 +98,66 @@ function excelDate(value: string) {
 export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
   const cells: RawCell[] = [];
   let sharedStringsXml = "";
-  let sheetFound = false;
-  let sheetDone = false;
-
-  // Estado da leitura da aba
-  let pending = "";
-  let headerRow: number | null = null;
-  let ucCol: string | null = null;
-  let lastUcRow = 0;
+  let workbookXml = "";
+  let relsXml = "";
+  let sheetCount = 0;
 
   const unzip = new Unzip();
   unzip.register(UnzipInflate);
 
-  const handleRows = (final: boolean) => {
-    let end: number;
-    while ((end = pending.indexOf("</row>")) !== -1) {
-      const rowXml = pending.slice(0, end + 6);
-      pending = pending.slice(end + 6);
-      const rowMatch = /<row[^>]*\sr="(\d+)"/.exec(rowXml);
-      if (!rowMatch) continue;
-      const rowNumber = Number(rowMatch[1]);
-      const rowCells = parseCells(rowXml, rowNumber);
-      cells.push(...rowCells);
-
-      // Descobre a linha de cabecalho para saber quando a lista terminou.
-      if (headerRow === null) {
-        const header = rowCells.find((cell) => cell.type !== "s" && normalize(cell.value) === "unidade consumidora");
-        // (cabecalhos em texto compartilhado sao resolvidos depois; aqui usamos so a posicao da coluna C como padrao)
-        if (header) {
-          headerRow = rowNumber;
-          ucCol = header.col;
-        }
-      }
-      if (rowCells.some((cell) => cell.col === (ucCol ?? "C") && rowNumber > (headerRow ?? 9) && cell.value.trim())) {
-        lastUcRow = rowNumber;
-      }
-      if (rowNumber > MAX_ROWS || (lastUcRow > 0 && rowNumber - lastUcRow > EMPTY_ROWS_TO_STOP)) {
-        sheetDone = true;
-        return;
-      }
-    }
-    if (final) sheetDone = true;
-  };
-
   await new Promise<void>((resolve, reject) => {
     unzip.onfile = (entry) => {
       const name = entry.name;
-      const isSheet = !sheetFound && /^xl\/worksheets\/sheet\d+\.xml$/.test(name);
-      const isShared = name === "xl/sharedStrings.xml";
-      if (!isSheet && !isShared) return;
-      if (isSheet) sheetFound = true;
+      const isSheet = /^xl\/worksheets\/sheet\d+\.xml$/.test(name) && sheetCount < MAX_SHEETS;
+      const target =
+        name === "xl/sharedStrings.xml"
+          ? "shared"
+          : name === "xl/workbook.xml"
+            ? "workbook"
+            : name === "xl/_rels/workbook.xml.rels"
+              ? "rels"
+              : null;
+      if (!isSheet && !target) return;
+      if (isSheet) sheetCount += 1;
 
       const decoder = new TextDecoder();
+      // Estado da leitura desta aba
+      const sheetFile = name.replace(/^xl\//, "");
+      let pending = "";
+      let lastFilledRow = 0;
+      let done = false;
+
       entry.ondata = (error, chunk, final) => {
         if (error) {
           reject(error);
           return;
         }
         const text = decoder.decode(chunk, { stream: !final });
-        if (isShared) {
-          sharedStringsXml += text;
-          return;
-        }
-        if (sheetDone) return;
+        if (target === "shared") sharedStringsXml += text;
+        if (target === "workbook") workbookXml += text;
+        if (target === "rels") relsXml += text;
+        if (!isSheet || done) return;
+
         pending += text;
-        handleRows(final);
-        if (sheetDone) {
+        let close: number;
+        while ((close = pending.indexOf("</row>")) !== -1) {
+          const rowXml = pending.slice(0, close + 6);
+          pending = pending.slice(close + 6);
+          const rowMatch = /<row[^>]*\sr="(\d+)"/.exec(rowXml);
+          if (!rowMatch) continue;
+          const rowNumber = Number(rowMatch[1]);
+          const rowCells = parseCells(rowXml, rowNumber, sheetFile);
+          if (rowCells.length) {
+            cells.push(...rowCells);
+            lastFilledRow = rowNumber;
+          }
+          if (rowNumber > MAX_ROWS || (lastFilledRow > 0 && rowNumber - lastFilledRow > EMPTY_ROWS_TO_STOP)) {
+            done = true;
+            break;
+          }
+        }
+        if (done) {
+          pending = "";
           try {
             entry.terminate();
           } catch {
@@ -183,7 +183,22 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
     pump().catch(reject);
   });
 
-  if (!sheetFound) throw new Error("Não encontrei nenhuma aba na planilha.");
+  if (!sheetCount) throw new Error("Não encontrei nenhuma aba na planilha.");
+
+  // Nome de cada aba (worksheets/sheetN.xml -> "Lista de Rateio"); a ordem dos atributos varia.
+  const attr = (tag: string, name: string) => new RegExp(`\\s${name}="([^"]*)"`).exec(tag)?.[1] ?? "";
+  const relTargets = new Map(
+    [...relsXml.matchAll(/<Relationship\b[^>]*>/g)].map((match) => [
+      attr(match[0], "Id"),
+      attr(match[0], "Target").replace(/^\/?xl\//, ""),
+    ]),
+  );
+  const sheetNames = new Map<string, string>();
+  for (const match of workbookXml.matchAll(/<sheet\b[^>]*>/g)) {
+    const target = relTargets.get(attr(match[0], "r:id"));
+    if (target) sheetNames.set(target, decodeXml(attr(match[0], "name")));
+  }
+  const sheetLabel = (sheet: string) => sheetNames.get(sheet) ?? sheet;
 
   // Resolve textos compartilhados
   const shared = parseSharedStrings(sharedStringsXml);
@@ -191,12 +206,21 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
     ...cell,
     text: cell.type === "s" ? shared[Number(cell.value)] ?? "" : cell.value,
   }));
-  const byRow = new Map<number, typeof resolved>();
+  type Resolved = (typeof resolved)[number];
+  const sheets = new Map<string, Map<number, Resolved[]>>();
   for (const cell of resolved) {
-    if (!byRow.has(cell.row)) byRow.set(cell.row, []);
-    byRow.get(cell.row)!.push(cell);
+    if (!sheets.has(cell.sheet)) sheets.set(cell.sheet, new Map());
+    const rows = sheets.get(cell.sheet)!;
+    if (!rows.has(cell.row)) rows.set(cell.row, []);
+    rows.get(cell.row)!.push(cell);
   }
-  for (const list of byRow.values()) list.sort((a, b) => colIndex(a.col) - colIndex(b.col));
+  for (const rows of sheets.values()) for (const list of rows.values()) list.sort((a, b) => colIndex(a.col) - colIndex(b.col));
+
+  // Aba do rateio: a que tem o cabecalho "Unidade Consumidora" + CPF/CNPJ (modelo da Equatorial).
+  const isListHeader = (list: Resolved[]) =>
+    list.some((cell) => normalize(cell.text) === "unidade consumidora") && list.some((cell) => /cpf|cnpj/.test(normalize(cell.text)));
+  const mainSheet = [...sheets.entries()].find(([, rows]) => [...rows.values()].some(isListHeader))?.[0] ?? [...sheets.keys()][0];
+  const byRow = sheets.get(mainSheet) ?? new Map<number, Resolved[]>();
 
   /** Valor da primeira celula preenchida a direita do rotulo. */
   const valueAfter = (label: RegExp) => {
@@ -252,6 +276,37 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
   }
 
   if (!entries.length) throw new Error("A planilha não tem nenhuma UC na lista de rateio.");
+
+  // Nomes dos clientes: qualquer aba com uma coluna de nome/cliente e uma de UC.
+  const ucKeys = [...new Set(entries.map((entry) => entry.uc.replace(/\D/g, "")))];
+  const names: Record<string, string> = {};
+  const namesFrom = new Set<string>();
+  const NAME_HEADER = /^(nome|cliente|nome do cliente|nome cliente|titular|nome do titular|razao social|beneficiario|consumidor)\b/;
+  const UC_HEADER = /^(uc|u\.c\.?|unidade consumidora|unid\.? consumidora|conta contrato|instalacao|codigo da uc|numero da uc|n. ?(da )?uc)\b/;
+  for (const [sheet, rows] of sheets) {
+    let nameCol: string | null = null;
+    let ucCol: string | null = null;
+    for (const [, list] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
+      const textCells = list.filter((cell) => cell.type === "s" || cell.type === "str" || cell.type === "inlineStr");
+      const nameHeader = textCells.find((cell) => NAME_HEADER.test(normalize(cell.text)));
+      const ucHeader = textCells.find((cell) => UC_HEADER.test(normalize(cell.text)) && !/geradora/.test(normalize(cell.text)));
+      if (nameHeader && ucHeader) {
+        nameCol = nameHeader.col;
+        ucCol = ucHeader.col;
+        continue;
+      }
+      if (!nameCol || !ucCol) continue;
+      const ucDigits = (list.find((cell) => cell.col === ucCol)?.text ?? "").replace(/\D/g, "");
+      const nameText = (list.find((cell) => cell.col === nameCol)?.text ?? "").replace(/\s+/g, " ").trim();
+      if (!ucDigits || !nameText || /^\d[\d.\-/ ]*$/.test(nameText)) continue;
+      // Aceita a UC com ou sem pontuacao e com zeros a esquerda.
+      const match = ucKeys.find((key) => key === ucDigits || key.replace(/^0+/, "") === ucDigits.replace(/^0+/, ""));
+      if (match && !names[match]) {
+        names[match] = nameText.slice(0, 80);
+        namesFrom.add(sheetLabel(sheet));
+      }
+    }
+  }
   const totalPct = entries.reduce((sum, entry) => sum + (entry.pct ?? 0), 0);
   const isPercent = !forma || /percentual/i.test(forma);
   if (isPercent && entries.some((entry) => entry.pct === null)) {
@@ -261,5 +316,8 @@ export async function parseRateioXlsx(file: Blob): Promise<ParsedRateio> {
     warnings.push(`A soma dos percentuais é ${(totalPct * 100).toFixed(3)}% (o esperado é 100%).`);
   }
 
-  return { ugUc, requestDate, enquadramento, forma, entries, totalPct, warnings };
+  const found = Object.keys(names).length;
+  if (found && found < entries.length) warnings.push(`Encontrei o nome do cliente de ${found} das ${entries.length} UCs.`);
+
+  return { names, namesFrom: [...namesFrom], ugUc, requestDate, enquadramento, forma, entries, totalPct, warnings };
 }

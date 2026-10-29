@@ -190,6 +190,8 @@ export function RateioTab() {
     }
   }
 
+  const nameOf = (uc: string) => upload?.parsed.names[key(uc)] || names[key(uc)] || "";
+
   const diff = useMemo(() => {
     if (!upload) return null;
     const base = versionFor(upload.effectiveMonth) ?? versions.at(-1) ?? null;
@@ -327,6 +329,12 @@ export function RateioTab() {
               {upload.parsed.forma ?? "—"}
             </p>
 
+            <p className={`mt-2 text-xs font-bold ${Object.keys(upload.parsed.names).length ? "text-emerald-700 dark:text-emerald-400" : "text-amber-700 dark:text-amber-300"}`}>
+              {Object.keys(upload.parsed.names).length
+                ? `✓ Nome do cliente encontrado para ${Object.keys(upload.parsed.names).length} de ${upload.parsed.entries.length} UCs (aba ${upload.parsed.namesFrom.map((sheet) => `“${sheet}”`).join(", ")}).`
+                : "Nenhuma aba com nome do cliente e UC foi encontrada nesta planilha — os nomes já salvos no site serão mantidos."}
+            </p>
+
             <label className="mt-4 flex flex-wrap items-center gap-3 text-sm font-black text-[#052e16] dark:text-white">
               Vale a partir da geração de
               <input
@@ -350,6 +358,7 @@ export function RateioTab() {
                 <ul className="mt-2 space-y-1 text-xs font-bold text-[#052e16] dark:text-white">
                   {diff.added.slice(0, 30).map((entry) => (
                     <li key={entry.uc}>
+                      {nameOf(entry.uc) ? `${nameOf(entry.uc)} · ` : ""}
                       {entry.uc} · {entry.pct !== null ? pctFmt.format(entry.pct) : "—"}
                     </li>
                   ))}
@@ -361,7 +370,7 @@ export function RateioTab() {
                 <ul className="mt-2 space-y-1 text-xs font-bold text-[#052e16] dark:text-white">
                   {diff.removed.slice(0, 30).map((entry) => (
                     <li key={entry.uc}>
-                      {names[key(entry.uc)] ? `${names[key(entry.uc)]} · ` : ""}
+                      {nameOf(entry.uc) ? `${nameOf(entry.uc)} · ` : ""}
                       {entry.uc}
                     </li>
                   ))}
@@ -373,7 +382,7 @@ export function RateioTab() {
                 <ul className="mt-2 space-y-1 text-xs font-bold text-[#052e16] dark:text-white">
                   {diff.changed.slice(0, 30).map(({ entry, old }) => (
                     <li key={entry.uc}>
-                      {names[key(entry.uc)] || entry.uc}: {pctFmt.format(old)} → {pctFmt.format(entry.pct ?? 0)}
+                      {nameOf(entry.uc) || entry.uc}: {pctFmt.format(old)} → {pctFmt.format(entry.pct ?? 0)}
                     </li>
                   ))}
                   {!diff.changed.length && <li className="text-slate-400">nenhum</li>}
@@ -432,7 +441,7 @@ export function RateioTab() {
             <div>
               <h2 className="text-xl font-black text-[#052e16] dark:text-white">Lista de rateio vigente</h2>
               <p className="text-xs font-bold text-slate-500 dark:text-emerald-400/50">
-                Estimativa = geração de {monthLabel(previousMonth, true).toLowerCase()} × % da UC. Clique no nome para dar um apelido à UC.
+                Estimativa = geração de {monthLabel(previousMonth, true).toLowerCase()} × % da UC. Os nomes vêm da planilha; clique no nome para corrigir.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -509,7 +518,7 @@ export function RateioTab() {
                 <tr className="border-b border-slate-100 text-[10px] font-black uppercase text-slate-400 dark:border-emerald-900/30">
                   <th className="pb-3 pr-3">#</th>
                   <th className="pb-3 pr-3">UC</th>
-                  <th className="pb-3 pr-3">Nome / apelido</th>
+                  <th className="pb-3 pr-3">Cliente</th>
                   <th className="pb-3 pr-3">Titular (CPF/CNPJ)</th>
                   <th className="pb-3 pr-3 text-right">% do excedente</th>
                   <th className="pb-3 pr-3 text-right">Estimativa/mês</th>

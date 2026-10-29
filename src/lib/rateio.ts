@@ -129,7 +129,15 @@ export async function saveRateioVersion(input: unknown): Promise<RateioVersion> 
     entries,
   };
 
-  await redis([["HSET", KEY_VERSIONS, version.id, JSON.stringify(version)]]);
+  // Nomes dos clientes vindos da planilha (substituem os apelidos dessas UCs).
+  const commands: Array<Array<string | number>> = [["HSET", KEY_VERSIONS, version.id, JSON.stringify(version)]];
+  if (body.names && typeof body.names === "object") {
+    for (const [uc, name] of Object.entries(body.names as Record<string, unknown>)) {
+      const clean = sanitizeText(name, 80);
+      if (clean && seen.has(ucKey(uc))) commands.push(["HSET", KEY_NAMES, ucKey(uc), clean]);
+    }
+  }
+  await redis(commands);
   return version;
 }
 
