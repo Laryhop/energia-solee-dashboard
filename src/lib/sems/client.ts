@@ -300,6 +300,7 @@ async function getInverterCounters(stationId: string, device: DeviceInfo): Promi
     dayGenerationKwh: parseNumber(factors.proPvStatsToday),
     monthGenerationKwh: parseNumber(factors.proPvStatsMonth),
     totalGenerationKwh: parseNumber(factors.proPvStatsTotal),
+    ratedPowerKw: parseNumber(factors.ratedPower) || undefined,
   };
 }
 
@@ -483,6 +484,36 @@ export async function getSemsProductionHistory(
   return data;
 }
 
+export type SemsLiveStatus = {
+  stationId: string;
+  checkedAt: string;
+  inverters: SemsInverter[];
+  /** Inversores cujos contadores nao puderam ser lidos (estado desconhecido, nao conta como parada). */
+  unreadable: string[];
+};
+
+/**
+ * Leitura leve para o monitoramento: so status e contadores dos inversores,
+ * sem historico (usada a cada 5 minutos pelo agendamento).
+ */
+export async function getSemsLiveStatus(): Promise<SemsLiveStatus> {
+  const { id: stationId } = await resolveStation();
+  const devices = await getInverterDevices(stationId);
+  const unreadable: string[] = [];
+  const inverters = (
+    await Promise.all(
+      devices.map((device) =>
+        getInverterCounters(stationId, device).catch(() => {
+          unreadable.push(device.sn);
+          return null;
+        }),
+      ),
+    )
+  ).filter((inv): inv is SemsInverter => inv !== null);
+
+  return { stationId, checkedAt: new Date().toISOString(), inverters, unreadable };
+}
+
 export function getStationToday() {
   return localDate(new Date());
 }
@@ -504,10 +535,14 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     optional(getSemsProductionHistory("month", yearAgo, today), [], "Historico mensal", errors),
   ]);
 
+  const unreadable: string[] = [];
   const inverters = await Promise.all(
     devices.map((device) =>
       optional(
-        getInverterCounters(stationId, device),
+        getInverterCounters(stationId, device).catch((error) => {
+          unreadable.push(device.sn);
+          throw error;
+        }),
         {
           id: device.sn,
           name: device.name,
@@ -565,6 +600,7 @@ export async function getSemsPlantSnapshot(): Promise<SemsPlantSnapshot> {
     hourlyChart: recordPowerReading(stationId, currentPowerKw, new Date()),
     dailyHistory: history,
     monthlyHistory,
+    unreadableInverters: unreadable,
     errorLog: errors.join(" ") || undefined,
   };
 }

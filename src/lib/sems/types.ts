@@ -12,6 +12,7 @@ export type SemsInverter = {
   dayGenerationKwh: number;
   monthGenerationKwh?: number;
   totalGenerationKwh: number;
+  ratedPowerKw?: number;
 };
 
 export type SemsHourlyPoint = {
@@ -38,5 +39,6 @@ export type SemsPlantSnapshot = {
   hourlyChart: SemsHourlyPoint[];
   dailyHistory: SemsDailyPoint[];
   monthlyHistory: SemsDailyPoint[];
+  unreadableInverters?: string[];
   errorLog?: string;
 };

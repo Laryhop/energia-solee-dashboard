@@ -3,6 +3,7 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
+import { OutageHistory } from "@/components/outage-history";
 import { PeriodAnalysis } from "@/components/period-analysis";
 import { PlantHealth } from "@/components/plant-health";
 import { cf, cp, nf } from "@/lib/format";
@@ -208,6 +209,12 @@ export function DashboardShell() {
           plantStatus={summary.statusLabel || ""}
           errorLog={solar?.errorLog}
           tomorrow={weatherDays[1] ?? null}
+        />
+
+        {/* HISTÓRICO DE PARADAS */}
+        <OutageHistory
+          today={today}
+          inverters={inverters.map((inv: any) => ({ id: inv.id, name: inv.name }))}
         />
 
         {/* ANÁLISE POR PERÍODO */}

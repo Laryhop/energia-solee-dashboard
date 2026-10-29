@@ -19,6 +19,7 @@ Projeto em Next.js preparado para deploy na Vercel, com integracao ao GoodWe SEM
 - **Alertas e saúde da usina**: inversores parados em horário de sol, dias sem registro, dias com geração muito abaixo do normal, queda de rendimento nas últimas 2 semanas e aviso de chuva para amanhã.
 - **Meta do mês**: progresso, projeção, kWh/dia necessários para bater a meta e comparação do acumulado do ano com o ano anterior.
 - **Análise de geração**: qualquer mês (dia a dia, com melhor/pior dia, média, dias abaixo da meta, comparação com mês anterior e ano anterior), últimos 6 ou 12 meses (com o mesmo mês do ano anterior ao lado), detalhe de um dia específico e exportação em CSV.
+- **Histórico de paradas**: registra automaticamente quando cada inversor para e volta, quanto tempo ficou parado, a energia que deixou de gerar e o valor perdido; visão por dia (linha do tempo), mês e ano, totais por inversor, disponibilidade, observações, opção de ignorar falso alarme e exportação CSV.
 - **Inversores**: status, potência, geração do dia/mês/total e participação de cada um na geração de hoje.
 
 ## Arquitetura
@@ -56,6 +57,21 @@ DASHBOARD_PASSWORD=sua_senha_do_painel
 - Se nao for informado, o backend tenta descobrir a primeira usina da conta.
 - `META_DIARIA` alimenta o calculo de performance.
 - `TARIFA_KWH` alimenta a estimativa de economia.
+
+## Monitoramento de paradas (configuracao)
+
+O historico de paradas precisa de um banco para ficar salvo:
+
+1. Na Vercel: **Storage → Create Database → Upstash for Redis** (plano gratuito) e conecte ao projeto. Isso cria `KV_REST_API_URL` e `KV_REST_API_TOKEN`.
+2. Faca um **Redeploy** para o painel enxergar as novas variaveis.
+
+A verificacao roda a cada 5 minutos, das 05:00 as 18:55, pelo GitHub Actions (`.github/workflows/monitor.yml`), chamando `/api/monitor`. O endereco do painel vem do campo *Website* do repositorio ou da variavel de repositorio `DASHBOARD_URL`. Enquanto o painel esta aberto, ele tambem verifica a cada minuto.
+
+Como a energia perdida e estimada:
+
+- se outros inversores estao gerando: potencia deles proporcional a potencia nominal do inversor parado (reflete o sol e as nuvens reais);
+- se a usina inteira para: geracao tipica (mediana dos ultimos 30 dias) distribuida numa curva solar padrao;
+- quando o inversor volta no mesmo dia, o que o contador diario dele registrou durante a parada e descontado (se ele so perdeu a conexao com o portal e seguiu gerando, a perda fica zero e a parada aparece como "so comunicacao").
 
 ## Desenvolvimento local
 

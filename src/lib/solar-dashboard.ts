@@ -1,6 +1,8 @@
+import { after } from "next/server";
 import { ZodError } from "zod";
 
 import { getEnv } from "@/lib/env";
+import { runMonitor } from "@/lib/monitor";
 import { getSemsPlantSnapshot, getSemsProductionHistory, getStationToday } from "@/lib/sems/client";
 
 export class SolarDashboardConfigError extends Error {}
@@ -138,6 +140,29 @@ export async function getSolarHistoryData(
   }
 }
 
+/** Aproveita a leitura do painel para registrar paradas (sem atrasar a resposta). */
+function scheduleMonitor(snapshot: Awaited<ReturnType<typeof getSemsPlantSnapshot>>) {
+  const today = getStationToday();
+  const closedDays = snapshot.dailyHistory
+    .filter((row) => !row.date.startsWith(today) && row.generationKwh > 0)
+    .slice(-30)
+    .map((row) => row.generationKwh)
+    .sort((a, b) => a - b);
+  const typicalDailyKwh = closedDays.length ? closedDays[Math.floor(closedDays.length / 2)] : undefined;
+
+  try {
+    after(() =>
+      runMonitor({
+        inverters: snapshot.inverters,
+        unreadable: snapshot.unreadableInverters,
+        typicalDailyKwh,
+      }).catch((error) => console.error("Monitor de paradas:", error)),
+    );
+  } catch {
+    // fora de uma requisicao (ex.: scripts) nao ha como agendar
+  }
+}
+
 function getMonthKey(date: string) {
   const current = new Date(date);
   const year = current.getUTCFullYear();
@@ -154,6 +179,7 @@ export async function getSolarDashboardData(): Promise<SolarDashboardData> {
 
   try {
     const snapshot = await getSemsPlantSnapshot();
+    scheduleMonitor(snapshot);
     const currentMonthKey = getMonthKey(new Date().toISOString());
     const monthlyPoint = snapshot.monthlyHistory.findLast(
       (item) => getMonthKey(item.date) === currentMonthKey,

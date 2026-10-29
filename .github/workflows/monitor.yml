@@ -1,0 +1,40 @@
+name: Monitorar inversores
+
+# Verifica os inversores a cada 5 minutos durante o dia (05:00-18:55 em Alagoas)
+# e registra as paradas no painel. O GitHub pode atrasar execucoes agendadas
+# em alguns minutos nos horarios de pico.
+on:
+  schedule:
+    - cron: "*/5 8-21 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verificar paradas
+        env:
+          # Endereco do painel: variavel DASHBOARD_URL do repositorio ou o "Website" do repositorio.
+          DASHBOARD_URL: ${{ vars.DASHBOARD_URL }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="${DASHBOARD_URL:-$(gh api "repos/${GITHUB_REPOSITORY}" --jq .homepage)}"
+          if [ -z "$url" ]; then
+            echo "::error::Defina a variavel DASHBOARD_URL do repositorio com o endereco do painel."
+            exit 1
+          fi
+          response=$(curl -sS --max-time 60 --retry 2 --retry-delay 10 -w '\n%{http_code}' "${url%/}/api/monitor")
+          code=$(echo "$response" | tail -n1)
+          echo "$response" | head -n -1
+          if [ "$code" -ge 400 ]; then
+            echo "::error::Verificacao falhou (HTTP $code)"
+            exit 1
+          fi
