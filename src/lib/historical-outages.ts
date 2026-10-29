@@ -54,17 +54,17 @@ function median(values: number[]) {
 
 const round = (value: number, digits = 2) => Number(value.toFixed(digits));
 
-/** Radiacao solar diaria (MJ/m2) do local da usina. */
-async function fetchRadiation(start: string, end: string) {
+/** Radiacao solar diaria (MJ/m2) do local da usina, direto da Open-Meteo. */
+async function fetchRadiationFromApi(start: string, end: string) {
   const params = `latitude=${LOCATION.latitude}&longitude=${LOCATION.longitude}&daily=shortwave_radiation_sum&timezone=America%2FMaceio`;
   const result = new Map<string, number>();
   const read = async (url: string) => {
-    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), next: { revalidate: 21_600 } });
+    const response = await fetch(url, { signal: AbortSignal.timeout(10_000), cache: "no-store" });
     if (!response.ok) throw new Error(`Open-Meteo respondeu HTTP ${response.status}.`);
     const data = (await response.json()) as { daily?: { time?: string[]; shortwave_radiation_sum?: Array<number | null> } };
     data.daily?.time?.forEach((day, index) => {
       const value = data.daily?.shortwave_radiation_sum?.[index];
-      if (typeof value === "number" && value > 0) result.set(day, value);
+      if (typeof value === "number" && value > 0 && day >= start && day <= end) result.set(day, value);
     });
   };
 
@@ -79,6 +79,35 @@ async function fetchRadiation(start: string, end: string) {
   if (end >= recentStart) {
     await read(`https://api.open-meteo.com/v1/forecast?${params}&past_days=92&forecast_days=1`);
   }
+  return result;
+}
+
+/**
+ * Radiacao com banco: dias com mais de 10 dias (ja consolidados no arquivo) ficam
+ * salvos em solee:radiation:<ano>; so os recentes e os que faltam vao na API.
+ */
+async function fetchRadiation(start: string, end: string) {
+  if (!isStorageConfigured()) return fetchRadiationFromApi(start, end);
+
+  const finalLimit = addDays(localDay(Date.now()), -10);
+  const days: string[] = [];
+  for (let day = start; day <= end; day = addDays(day, 1)) days.push(day);
+  const years = [...new Set(days.map((day) => day.slice(0, 4)))];
+  const stored = (await redis(years.map((year) => ["HGETALL", `solee:radiation:${year}`]))).map(hashToObject);
+  const result = new Map<string, number>();
+  stored.forEach((hash) => Object.entries(hash).forEach(([day, value]) => result.set(day, Number(value))));
+
+  const missing = days.filter((day) => !result.has(day));
+  if (!missing.length) return result;
+
+  const fetched = await fetchRadiationFromApi(missing[0], missing.at(-1) as string);
+  const commands: Array<Array<string | number>> = [];
+  for (const [day, value] of fetched) {
+    if (result.has(day)) continue;
+    result.set(day, value);
+    if (day <= finalLimit) commands.push(["HSET", `solee:radiation:${day.slice(0, 4)}`, day, value]);
+  }
+  if (commands.length) await redis(commands);
   return result;
 }
 

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { getEnv } from "@/lib/env";
+import { hashToObject, isStorageConfigured, redis } from "@/lib/storage";
 import type {
   SemsDailyPoint,
   SemsHourlyPoint,
@@ -441,7 +442,7 @@ const historyCache = new Map<string, { expiresAt: number; data: SemsDailyPoint[]
  * Producao da usina entre duas datas (YYYY-MM-DD), por dia ou por mes.
  * Periodos fechados ficam 6h em cache; periodos que incluem hoje, 5 minutos.
  */
-export async function getSemsProductionHistory(
+async function fetchProductionFromApi(
   dimension: "day" | "month",
   start: string,
   end: string,
@@ -512,6 +513,139 @@ export async function getSemsLiveStatus(): Promise<SemsLiveStatus> {
   ).filter((inv): inv is SemsInverter => inv !== null);
 
   return { stationId, checkedAt: new Date().toISOString(), inverters, unreadable };
+}
+
+// ---------- historico salvo no banco do painel ----------
+
+/*
+ * A geracao de cada dia fechado fica salva no Redis (solee:daily:<usina>:<ano>,
+ * campo AAAA-MM-DD -> kWh, ou "-" quando o SEMS+ nao tem registro do dia).
+ * Dias antigos sao lidos so do banco; a API do SEMS+ e usada apenas para os
+ * dias recentes (o portal ainda pode corrigir os ultimos dias quando o
+ * datalogger reenvia dados atrasados) e para preencher o que faltar no banco.
+ */
+const FINAL_AFTER_DAYS = 3;
+const NO_RECORD = "-";
+const dailyKey = (stationId: string, year: string) => `solee:daily:${stationId}:${year}`;
+
+function daysBetween(start: string, end: string) {
+  const days: string[] = [];
+  for (let day = start; day <= end; day = addDays(day, 1)) days.push(day);
+  return days;
+}
+
+/** Agrupa dias em intervalos seguidos [inicio, fim]. */
+function toRanges(days: string[]) {
+  const ranges: Array<[string, string]> = [];
+  for (const day of days) {
+    const last = ranges.at(-1);
+    if (last && addDays(last[1], 1) === day) last[1] = day;
+    else ranges.push([day, day]);
+  }
+  return ranges;
+}
+
+export type ProductionSyncResult = {
+  storedDays: number;
+  fetchedDays: number;
+  recentDays: number;
+  firstDay: string | null;
+  lastStoredDay: string | null;
+};
+
+/**
+ * Le a geracao diaria entre duas datas usando o banco; busca na API so o que
+ * nao esta salvo (e os ultimos dias). Grava no banco os dias fechados buscados.
+ */
+async function getDailyWithStore(start: string, end: string): Promise<{ rows: Map<string, number>; sync: ProductionSyncResult }> {
+  const today = localDate(new Date());
+  const cappedEnd = end > today ? today : end;
+  const lastFinal = addDays(today, -FINAL_AFTER_DAYS);
+  const { id } = await resolveStation();
+  const rows = new Map<string, number>();
+  const sync: ProductionSyncResult = { storedDays: 0, fetchedDays: 0, recentDays: 0, firstDay: null, lastStoredDay: null };
+  if (start > cappedEnd) return { rows, sync };
+
+  // 1. o que ja esta salvo
+  const years = [...new Set(daysBetween(start, cappedEnd).map((day) => day.slice(0, 4)))];
+  const stored = (await redis(years.map((year) => ["HGETALL", dailyKey(id, year)]))).map(hashToObject);
+  const storedDays = new Map<string, string>();
+  stored.forEach((hash) => Object.entries(hash).forEach(([day, value]) => storedDays.set(day, value)));
+
+  const finalEnd = cappedEnd < lastFinal ? cappedEnd : lastFinal;
+  const missing = start <= finalEnd ? daysBetween(start, finalEnd).filter((day) => !storedDays.has(day)) : [];
+
+  // 2. busca na API so os dias fechados que faltam e grava
+  for (const [rangeStart, rangeEnd] of toRanges(missing)) {
+    const fetched = await fetchProductionFromApi("day", rangeStart, rangeEnd);
+    const values = new Map(fetched.map((row) => [row.date.slice(0, 10), row.generationKwh]));
+    const commands: Array<Array<string | number>> = [];
+    for (const day of daysBetween(rangeStart, rangeEnd)) {
+      const value = values.has(day) ? String(values.get(day)) : NO_RECORD;
+      storedDays.set(day, value);
+      commands.push(["HSET", dailyKey(id, day.slice(0, 4)), day, value]);
+    }
+    if (commands.length) await redis(commands);
+    sync.fetchedDays += commands.length;
+  }
+
+  for (const [day, value] of storedDays) {
+    if (day < start || day > finalEnd) continue;
+    sync.storedDays += 1;
+    if (value !== NO_RECORD) {
+      rows.set(day, Number(value));
+      if (!sync.firstDay || day < sync.firstDay) sync.firstDay = day;
+      if (!sync.lastStoredDay || day > sync.lastStoredDay) sync.lastStoredDay = day;
+    }
+  }
+
+  // 3. dias atuais sempre da API
+  const recentStart = start > lastFinal ? start : addDays(lastFinal, 1);
+  if (recentStart <= cappedEnd) {
+    const recent = await fetchProductionFromApi("day", recentStart, cappedEnd);
+    for (const row of recent) rows.set(row.date.slice(0, 10), row.generationKwh);
+    sync.recentDays = daysBetween(recentStart, cappedEnd).length;
+  }
+
+  return { rows, sync };
+}
+
+/**
+ * Producao da usina entre duas datas (AAAA-MM-DD), por dia ou por mes.
+ * Com o banco configurado, dias antigos vem do banco e so os atuais da API.
+ * Os totais mensais sao a soma dos dias.
+ */
+export async function getSemsProductionHistory(
+  dimension: "day" | "month",
+  start: string,
+  end: string,
+): Promise<SemsDailyPoint[]> {
+  if (!isStorageConfigured()) return fetchProductionFromApi(dimension, start, end);
+
+  const dailyStart = dimension === "month" ? `${start.slice(0, 7)}-01` : start;
+  let rows: Map<string, number>;
+  try {
+    ({ rows } = await getDailyWithStore(dailyStart, end));
+  } catch (error) {
+    console.error("Banco indisponivel, usando a API do SEMS+:", error);
+    return fetchProductionFromApi(dimension, start, end);
+  }
+
+  const days = [...rows.entries()].sort(([a], [b]) => a.localeCompare(b));
+  if (dimension === "day") {
+    return days.map(([day, kwh]) => ({ date: `${day}T12:00:00.000Z`, generationKwh: kwh }));
+  }
+  const months = new Map<string, number>();
+  for (const [day, kwh] of days) months.set(day.slice(0, 7), (months.get(day.slice(0, 7)) ?? 0) + kwh);
+  return [...months.entries()].map(([month, kwh]) => ({
+    date: `${month}-01T12:00:00.000Z`,
+    generationKwh: Number(kwh.toFixed(2)),
+  }));
+}
+
+/** Garante que o banco tem todos os dias fechados do periodo (usado pelo agendamento). */
+export async function syncProductionStore(start: string, end: string): Promise<ProductionSyncResult> {
+  return (await getDailyWithStore(start, end)).sync;
 }
 
 export function getStationToday() {

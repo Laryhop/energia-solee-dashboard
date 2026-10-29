@@ -38,6 +38,7 @@ jobs:
             body=$(echo "$response" | head -n -1)
             echo "$url -> HTTP $code $body"
             if echo "$body" | grep -q '"ok"'; then
+              echo "::notice title=Resultado::$body"
               if [ "$code" -ge 400 ]; then
                 echo "::error::Verificacao falhou em $url (HTTP $code): $body"
                 exit 1

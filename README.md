@@ -73,6 +73,15 @@ Como a energia perdida e estimada:
 - se a usina inteira para: geracao tipica (mediana dos ultimos 30 dias) distribuida numa curva solar padrao;
 - quando o inversor volta no mesmo dia, o que o contador diario dele registrou durante a parada e descontado (se ele so perdeu a conexao com o portal e seguiu gerando, a perda fica zero e a parada aparece como "so comunicacao").
 
+## Historico salvo no banco
+
+Com o Upstash conectado, a geracao de cada dia fica salva no banco do painel
+(`solee:daily:<usina>:<ano>`), assim como a radiacao solar usada nas estimativas
+(`solee:radiation:<ano>`). Dias antigos sao lidos so do banco; a API do SEMS+ e
+consultada apenas para os ultimos 3 dias (o portal ainda pode corrigi-los) e para
+preencher algum dia que falte. A verificacao agendada preenche automaticamente
+desde 1º de janeiro do ano anterior; totais mensais sao a soma dos dias.
+
 ## Desenvolvimento local
 
 ```bash
