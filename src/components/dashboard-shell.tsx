@@ -7,9 +7,11 @@ import { OutageHistory } from "@/components/outage-history";
 import { PeriodAnalysis } from "@/components/period-analysis";
 import { PlantHealth } from "@/components/plant-health";
 import { RateioTab } from "@/components/rateio-tab";
+import { RepassesTab } from "@/components/repasses-tab";
 import { cf, cp, nf } from "@/lib/format";
 
 // --- Tipagens ---
+type Aba = "geracao" | "rateio" | "repasses";
 type ApiState = { status: "loading" } | { status: "error"; message: string } | { status: "success"; data: any };
 
 type WeatherDay = {
@@ -48,18 +50,21 @@ export function DashboardShell() {
   const [isDark, setIsDark] = useState(false);
   const [hoverData, setHoverData] = useState<any>(null);
   const [staleSince, setStaleSince] = useState<string | null>(null);
-  const [tab, setTab] = useState<"geracao" | "rateio">("geracao");
+  const [tab, setTab] = useState<Aba>("geracao");
 
   // Aba escolhida fica no endereco (#rateio), para recarregar na mesma aba.
   useEffect(() => {
-    const fromHash = () => setTab(window.location.hash === "#rateio" ? "rateio" : "geracao");
+    const fromHash = () => {
+      const h = window.location.hash;
+      setTab(h === "#rateio" ? "rateio" : h === "#repasses" ? "repasses" : "geracao");
+    };
     fromHash();
     window.addEventListener("hashchange", fromHash);
     return () => window.removeEventListener("hashchange", fromHash);
   }, []);
-  const chooseTab = (next: "geracao" | "rateio") => {
+  const chooseTab = (next: Aba) => {
     setTab(next);
-    window.history.replaceState(null, "", next === "rateio" ? "#rateio" : window.location.pathname);
+    window.history.replaceState(null, "", next === "geracao" ? window.location.pathname : `#${next}`);
   };
 
   useEffect(() => {
@@ -193,6 +198,7 @@ export function DashboardShell() {
           {([
             ["geracao", "Geração e usina"],
             ["rateio", "Rateio dos créditos"],
+            ["repasses", "Repasses"],
           ] as const).map(([id, label]) => (
             <button
               key={id}
@@ -212,6 +218,8 @@ export function DashboardShell() {
 
         {tab === "rateio" ? (
           <RateioTab />
+        ) : tab === "repasses" ? (
+          <RepassesTab />
         ) : (
         <>
 
